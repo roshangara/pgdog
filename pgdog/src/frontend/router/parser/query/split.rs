@@ -24,6 +24,14 @@ impl QueryParser {
             ))));
         }
 
+        // One shard: the query goes to the server whole (batch.rs).
+        if context.shards == 1
+            && !context.dry_run
+            && let Some(command) = self.single_shard_batch(ast, context)?
+        {
+            return Ok(Some(command));
+        }
+
         let stmts = &ast.ast;
 
         match self.try_multi_set(&**stmts, context) {

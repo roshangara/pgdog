@@ -59,7 +59,7 @@ impl QueryParser {
         ))
     }
 
-    fn transaction_type<'a>(
+    pub(super) fn transaction_type<'a>(
         options: impl IntoIterator<Item = Node<'a>>,
     ) -> Option<TransactionType> {
         for option in options {

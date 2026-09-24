@@ -7,7 +7,7 @@ struct TempTableState {
 }
 
 #[derive(Debug, Clone)]
-pub(in crate::frontend) enum TempTableChange {
+pub(crate) enum TempTableChange {
     Create { name: String, drop_on_commit: bool },
     Drop(String),
 }

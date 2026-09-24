@@ -25,6 +25,7 @@ pub(crate) mod rewrite;
 pub(crate) mod route;
 pub(crate) mod schema;
 mod sequence;
+pub(crate) mod session;
 pub(crate) mod statement;
 mod table;
 pub(crate) mod value;
@@ -52,6 +53,7 @@ pub(crate) use rewrite::{StatementRewrite, StatementRewriteContext, statement::R
 pub(crate) use route::{Route, Shard, ShardWithPriority, ShardsWithPriority};
 pub(crate) use schema::Schema;
 pub(crate) use sequence::Sequence;
+pub(crate) use session::{SessionChange, SessionChanges};
 pub(crate) use statement::{SchemaLookupContext, StatementParser};
 pub(crate) use table::Table;
 pub(crate) use value::Value;

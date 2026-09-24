@@ -32,14 +32,16 @@ impl QueryParser {
         }
     }
 
-    /// Parse a single SET statement into a SetParam
-    fn parse_set_param(stmt: &nodes::VariableSetStmt) -> Result<SetParam, Error> {
+    /// Parse a single SET statement into a SetParam: `SET x = y`,
+    /// `SET x TO DEFAULT` and `RESET x`. Any other kind (`RESET ALL`,
+    /// `SET TRANSACTION`, `SET x FROM CURRENT`) is an error, never a panic.
+    pub(super) fn parse_set_param(stmt: &nodes::VariableSetStmt) -> Result<SetParam, Error> {
         let value = if stmt.kind == VAR_SET_VALUE {
             Some(Self::parse_set_values(stmt)?)
         } else if stmt.kind == VAR_RESET || stmt.kind == VAR_SET_DEFAULT {
             None
         } else {
-            panic!("parse_set_param called on invalid kind {}", stmt.kind);
+            return Err(Error::UnsupportedSet(stmt.kind));
         };
 
         match value {
@@ -71,10 +73,14 @@ impl QueryParser {
     ) -> Result<Option<Command>, Error> {
         let mut has_other = false;
 
+        // RESET ALL, SET TRANSACTION and SET ... FROM CURRENT aren't one
+        // parameter: they count as other statements.
         let params = stmts
             .into_iter()
             .filter_map(|stmt| match stmt.stmt() {
-                Node::VariableSetStmt(stmt) if stmt.kind != VAR_SET_MULTI => {
+                Node::VariableSetStmt(stmt)
+                    if matches!(stmt.kind, VAR_SET_VALUE | VAR_SET_DEFAULT | VAR_RESET) =>
+                {
                     Some(Self::parse_set_param(stmt))
                 }
                 _ => {

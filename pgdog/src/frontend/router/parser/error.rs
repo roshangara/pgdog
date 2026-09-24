@@ -85,6 +85,12 @@ pub(crate) enum Error {
     #[error("multi-query statement cannot be safely executed")]
     MultiStatementSafety,
 
+    #[error("LISTEN must be sent as a query of its own, not with other statements")]
+    MultiStatementListen,
+
+    #[error("unsupported SET statement (kind {0})")]
+    UnsupportedSet(u32),
+
     #[error("unmapped sharding key was specified")]
     UnmappedShardKey(String),
 

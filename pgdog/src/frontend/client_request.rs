@@ -249,6 +249,12 @@ impl ClientRequest {
             .any(|m| ['E', 'Q', 'B'].contains(&m.code()))
     }
 
+    /// The request runs a statement: a simple Query, or an Execute. A
+    /// Parse, Bind or Describe without Execute runs nothing.
+    pub(crate) fn executes(&self) -> bool {
+        self.messages.iter().any(|m| ['E', 'Q'].contains(&m.code()))
+    }
+
     /// Portal should outlive the batch, only Sync closes.
     pub(crate) fn opens_portal(&self) -> bool {
         self.messages

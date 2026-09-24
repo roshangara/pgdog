@@ -79,3 +79,18 @@ async fn simple_split_stops_after_transaction_error() {
 
     assert_connection_usable(&mut client).await;
 }
+
+/// `RESET ALL` among other statements panicked the client's handler
+/// (ganjban lab P-6). Sharded, it runs statement by statement.
+#[tokio::test]
+async fn reset_all_with_set_sharded_does_not_panic() {
+    let mut client = TestClient::new_sharded(Parameters::default()).await;
+
+    client
+        .send_simple(Query::new("SET application_name = 'x'; RESET ALL"))
+        .await;
+    let messages = client.read_until('Z').await.unwrap();
+    let codes = messages.iter().map(|m| m.code()).collect_vec();
+    assert_eq!(codes, ['C', 'C', 'Z']);
+    assert_connection_usable(&mut client).await;
+}

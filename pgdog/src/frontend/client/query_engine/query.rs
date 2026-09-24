@@ -174,6 +174,7 @@ impl QueryEngine {
         }
 
         if code == 'E' {
+            self.request_error = true;
             if let Some(state) = self.pending_explain.as_mut() {
                 state.annotated = true;
             }
@@ -263,6 +264,14 @@ impl QueryEngine {
 
             if let Some(change) = self.router.command().route().temp_table_change.as_ref() {
                 self.temp_tables.update(change, context.in_transaction());
+            }
+
+            // Session state of the statement(s) of a request that ran them
+            // (a Parse/Describe of the same text runs nothing).
+            if context.client_request.executes()
+                && let Some(changes) = self.router.command().route().session_changes().cloned()
+            {
+                self.record_session_changes(context, &changes);
             }
 
             self.check_lock();

@@ -1,7 +1,7 @@
 use std::{fmt::Display, ops::Deref};
 
 use super::{
-    Aggregate, DistinctBy, Limit, OrderBy, explain_trace::ExplainTrace,
+    Aggregate, DistinctBy, Limit, OrderBy, SessionChanges, explain_trace::ExplainTrace,
     rewrite::statement::aggregate::AggregateRewritePlan, statement::AdvisoryLocks,
 };
 use crate::frontend::{client::query_engine::TempTableChange, router::sharding::PendingLookup};
@@ -140,6 +140,8 @@ pub(crate) struct Route {
     pending_lookups: Vec<PendingLookup>,
     /// The temporary table being created/dropped if present
     pub(in crate::frontend) temp_table_change: Option<TempTableChange>,
+    /// Session state the statement(s) leave on the server connection.
+    session_changes: Option<SessionChanges>,
 }
 
 impl Display for Route {
@@ -427,6 +429,17 @@ impl Route {
     pub(super) fn with_temp_table_change(mut self, temp_table: Option<TempTableChange>) -> Self {
         self.temp_table_change = temp_table;
         self
+    }
+
+    /// Session state the statement(s) leave on the server connection.
+    pub(crate) fn with_session_changes(mut self, changes: Option<SessionChanges>) -> Self {
+        self.session_changes = changes.filter(|changes| !changes.is_empty());
+        self
+    }
+
+    /// Session state the statement(s) leave on the server connection.
+    pub(crate) fn session_changes(&self) -> Option<&SessionChanges> {
+        self.session_changes.as_ref()
     }
 }
 

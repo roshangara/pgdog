@@ -25,7 +25,7 @@ impl QueryParser {
 }
 
 /// Returns None if the arguments could not be parsed
-fn parse_args(fcall: &nodes::FuncCall) -> Option<SetParam> {
+pub(super) fn parse_args(fcall: &nodes::FuncCall) -> Option<SetParam> {
     let name = parse_config_name(fcall.args().first()?)?;
     let value = parse_config_value(fcall.args().get(1)?)?;
     let local = parse_is_local(fcall.args().get(2)?)?;

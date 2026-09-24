@@ -34,11 +34,7 @@ fn advisory_locks_from_func_call(
         // Postgres drops them automatically at COMMIT/ROLLBACK.
         "pg_advisory_unlock" => (true, LockScope::Session),
         "pg_advisory_unlock_all" => {
-            return vec![AdvisoryLock {
-                id: None,
-                unlock: true,
-                scope: LockScope::Session,
-            }];
+            return vec![AdvisoryLock::unlock_all()];
         }
         _ => return Vec::new(),
     };
@@ -48,6 +44,7 @@ fn advisory_locks_from_func_call(
             id: None,
             unlock,
             scope,
+            all: false,
         }];
     };
 
@@ -57,6 +54,7 @@ fn advisory_locks_from_func_call(
             id: Some(id),
             unlock,
             scope,
+            all: false,
         }];
     }
 
@@ -82,6 +80,7 @@ fn advisory_locks_from_func_call(
                 id: integer_arg(*v, bind),
                 unlock,
                 scope,
+                all: false,
             })
             .collect();
     }
@@ -90,6 +89,7 @@ fn advisory_locks_from_func_call(
         id: None,
         unlock,
         scope,
+        all: false,
     }]
 }
 
@@ -184,12 +184,34 @@ pub(crate) struct AdvisoryLock {
     pub(crate) id: Option<i64>,
     pub(crate) unlock: bool,
     pub(crate) scope: LockScope,
+    /// `pg_advisory_unlock_all()`.
+    pub(crate) all: bool,
+}
+
+impl AdvisoryLock {
+    /// `pg_advisory_unlock_all()`: every session lock released.
+    pub(crate) fn unlock_all() -> Self {
+        Self {
+            id: None,
+            unlock: true,
+            scope: LockScope::Session,
+            all: true,
+        }
+    }
 }
 
 /// Set of advisory locks discovered while walking a statement.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AdvisoryLocks {
     locks: HashSet<AdvisoryLock>,
+}
+
+impl FromIterator<AdvisoryLock> for AdvisoryLocks {
+    fn from_iter<T: IntoIterator<Item = AdvisoryLock>>(iter: T) -> Self {
+        Self {
+            locks: iter.into_iter().collect(),
+        }
+    }
 }
 
 impl AdvisoryLocks {
@@ -2996,6 +3018,7 @@ mod test {
                 id,
                 unlock,
                 scope: LockScope::Session,
+                all: false,
             }
         }
 
@@ -3004,6 +3027,7 @@ mod test {
                 id,
                 unlock,
                 scope: LockScope::Transaction,
+                all: false,
             }
         }
 
@@ -3085,7 +3109,7 @@ mod test {
             // unlock_all takes no arguments, so it always applies.
             assert_eq!(
                 locks("SELECT pg_advisory_unlock_all()"),
-                vec![session(None, true)],
+                vec![AdvisoryLock::unlock_all()],
             );
         }
 
@@ -3179,7 +3203,7 @@ mod test {
                      pg_advisory_unlock(30), pg_advisory_unlock_all()",
                 ),
                 vec![
-                    session(None, true),
+                    AdvisoryLock::unlock_all(),
                     session(Some(10), false),
                     xact(Some(20), false),
                     session(Some(30), true),

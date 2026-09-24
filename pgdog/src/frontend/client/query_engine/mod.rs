@@ -34,6 +34,7 @@ pub(crate) mod read_after_write;
 pub(crate) mod result;
 pub(crate) mod rewrite;
 pub(crate) mod route_query;
+pub(crate) mod session;
 pub(crate) mod set;
 pub(crate) mod split;
 pub(crate) mod start_transaction;
@@ -52,7 +53,7 @@ use notify_buffer::NotifyBuffer;
 use read_after_write::ReadAfterWrite;
 pub(crate) use result::QueryEngineResult;
 pub(crate) use split::Pipeline;
-pub(in crate::frontend) use temp_table::TempTableChange;
+pub(crate) use temp_table::TempTableChange;
 use temp_table::TempTables;
 use two_pc::TwoPc;
 pub(crate) use two_pc::phase::TwoPcPhase;
@@ -79,6 +80,8 @@ pub(crate) struct QueryEngine {
     temp_tables: TempTables,
     // Keeps the client's reads on the primary after it wrote.
     read_after_write: ReadAfterWrite,
+    // The server returned an error for the current request.
+    request_error: bool,
 }
 
 impl QueryEngine {
@@ -108,6 +111,7 @@ impl QueryEngine {
             manual_lock: false,
             temp_tables: Default::default(),
             read_after_write: ReadAfterWrite::default(),
+            request_error: false,
         })
     }
 
@@ -147,6 +151,7 @@ impl QueryEngine {
         self.stats
             .received(context.client_request.total_message_len());
         self.set_state(State::Active); // Client is active.
+        self.request_error = false;
 
         if self.in_extended_pipeline_error(context) {
             return Ok(QueryEngineResult::Done(context.transaction()));

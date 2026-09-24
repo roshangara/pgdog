@@ -456,6 +456,12 @@ impl Connection {
         }
     }
 
+    /// The client changed session state on the server connection(s) that
+    /// its parameters don't replay: clean them before they're reused.
+    pub(crate) fn mark_dirty(&mut self) {
+        self.binding.dirty();
+    }
+
     /// Check if any held server connection is currently locked to a client.
     #[cfg(test)]
     pub(crate) fn locked(&self) -> bool {

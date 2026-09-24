@@ -9,16 +9,20 @@ pub(crate) struct AdvisoryLocks {
 }
 
 impl AdvisoryLocks {
+    /// Apply the lock calls of a statement: releases first, then
+    /// acquisitions (a multi-statement query's calls come netted so).
     pub(crate) fn merge(&mut self, locks: &ParserAdvisoryLocks) {
-        for lock in locks.iter() {
-            if lock.unlock {
-                if let Some(id) = lock.id {
-                    self.locks.remove(&id);
-                } else {
-                    // pg_advisory_unlock_all() clears every advisory lock.
-                    self.locks.clear();
-                }
-            } else if let Some(id) = lock.id
+        for lock in locks.iter().filter(|lock| lock.unlock) {
+            if let Some(id) = lock.id {
+                self.locks.remove(&id);
+            } else {
+                // pg_advisory_unlock_all() clears every advisory lock.
+                self.locks.clear();
+            }
+        }
+
+        for lock in locks.iter().filter(|lock| !lock.unlock) {
+            if let Some(id) = lock.id
                 && lock.scope == LockScope::Session
             {
                 self.locks.insert(id);

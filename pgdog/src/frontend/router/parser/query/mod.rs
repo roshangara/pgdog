@@ -21,6 +21,7 @@ use super::{
     explain_trace::{ExplainRecorder, ExplainSummary},
     *,
 };
+mod batch;
 mod ddl;
 mod delete;
 mod explain;
