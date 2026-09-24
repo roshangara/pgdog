@@ -204,3 +204,42 @@ async fn test_write_without_primary_waits_checkout_timeout() {
 
     lb.shutdown();
 }
+
+/// The elected primary refuses connections (here: its pool is offline). The
+/// write waits for the next election instead of failing.
+#[tokio::test]
+async fn test_write_waits_when_primary_refuses() {
+    let lb = auto_lb(&[("127.0.0.1", 5432), ("localhost", 5432)]);
+    lb.targets[1].pool.launch();
+    stats(&lb.targets[0], false, 7, 500, FRESH);
+    stats(&lb.targets[1], true, 0, 500, FRESH);
+    assert!(lb.redetect_roles());
+    assert_eq!(
+        lb.primary().map(|pool| pool.addr().host.clone()),
+        Some("127.0.0.1".into())
+    );
+
+    let write = {
+        let lb = lb.clone();
+        tokio::spawn(async move { lb.get_primary(&Request::default()).await })
+    };
+
+    sleep(Duration::from_millis(600)).await;
+    assert!(
+        !write.is_finished(),
+        "a refusing primary must not fail the write"
+    );
+
+    stats(&lb.targets[1], false, 8, 520, FRESH);
+    assert!(lb.redetect_roles());
+
+    let conn = timeout(Duration::from_secs(1), write)
+        .await
+        .expect("the write must move to the new primary")
+        .unwrap()
+        .expect("connection to the new primary");
+    assert_eq!(conn.pool.addr().host, "localhost");
+    drop(conn);
+
+    lb.shutdown();
+}

@@ -11,7 +11,7 @@ use std::{
 use rand::seq::SliceRandom;
 use tokio::select;
 use tokio::sync::watch;
-use tokio::time::{Instant, sleep_until};
+use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -34,6 +34,9 @@ pub(crate) use target_health::*;
 
 #[cfg(test)]
 mod test;
+
+/// How often a write waiting for an election retries a primary that failed.
+const PRIMARY_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// Read query load balancer target.
 #[derive(Clone, Debug)]
@@ -382,14 +385,44 @@ impl LoadBalancer {
                 }
             };
 
-            select! {
-                result = checkout => return result,
+            let next = select! {
+                result = checkout => Some(result),
                 changed = new_election => {
                     if changed.is_err() {
                         return Err(Error::NoPrimary);
                     }
+                    None
                 }
                 _ = sleep_until(deadline) => return Err(Error::CheckoutTimeout),
+            };
+
+            match next {
+                Some(Ok(conn)) => return Ok(conn),
+
+                // The elected primary refused or timed out: for this write it
+                // is no primary. Wait for the next election, and try it again
+                // now and then in case it comes back.
+                Some(Err(err)) => {
+                    warn!(
+                        "primary unavailable, waiting for an election: {} [{}]",
+                        err,
+                        address.as_ref().map(|a| a.to_string()).unwrap_or_default()
+                    );
+
+                    let retry = sleep(PRIMARY_RETRY_DELAY);
+                    let new_election = elections.wait_for(|current| {
+                        current.as_ref().map(|pool| pool.addr()) != address.as_ref()
+                    });
+
+                    select! {
+                        _ = new_election => (),
+                        _ = retry => (),
+                        _ = sleep_until(deadline) => return Err(Error::CheckoutTimeout),
+                    }
+                }
+
+                // New election: try the new primary.
+                None => (),
             }
         }
     }

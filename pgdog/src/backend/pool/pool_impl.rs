@@ -295,6 +295,10 @@ impl Pool {
                 self.addr()
             );
             self.inner.health.toggle(false);
+            // A connection that failed on the network (reset, timeout) means
+            // the idle ones to the same server are likely dead too: don't hand
+            // them to the next clients, open fresh ones instead.
+            self.lock().dump_idle();
         }
 
         // Notify maintenance that we need a new connection because
