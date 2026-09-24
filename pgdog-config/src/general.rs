@@ -520,6 +520,14 @@ pub struct General {
     #[serde(default = "General::checkout_timeout")]
     pub checkout_timeout: u64,
 
+    /// Maximum amount of time a read waits for a connection from one replica before
+    /// PgDog bans that replica and tries the next one. The last replica a read can go to
+    /// is waited for up to `checkout_timeout`. `0` uses `checkout_timeout`.
+    ///
+    /// _Default:_ `0`
+    #[serde(default = "General::replica_checkout_timeout")]
+    pub replica_checkout_timeout: u64,
+
     /// Maximum amount of time new clients have to complete authentication.
     ///
     /// _Default:_ `60000`
@@ -949,6 +957,7 @@ impl Default for General {
             read_write_strategy: Self::read_write_strategy(),
             read_write_split: Self::read_write_split(),
             read_after_write_ms: Self::read_after_write_ms(),
+            replica_checkout_timeout: Self::replica_checkout_timeout(),
             primary_functions: Vec::new(),
             route_unknown_functions_to_primary: Self::route_unknown_functions_to_primary(),
             tls_certificate: Self::tls_certificate(),
@@ -1365,6 +1374,10 @@ impl General {
 
     fn read_write_split() -> ReadWriteSplit {
         Self::env_enum_or_default("PGDOG_READ_WRITE_SPLIT")
+    }
+
+    fn replica_checkout_timeout() -> u64 {
+        Self::env_or_default("PGDOG_REPLICA_CHECKOUT_TIMEOUT", 0)
     }
 
     fn read_after_write_ms() -> u64 {

@@ -115,7 +115,17 @@ impl Pool {
     }
 
     pub(crate) async fn get(&self, request: &Request) -> Result<Guard, Error> {
-        match safe_timeout(self.config().checkout_timeout, self.get_internal(request)).await {
+        self.get_timeout(request, self.config().checkout_timeout)
+            .await
+    }
+
+    /// Get a connection, waiting at most `timeout` for one.
+    pub(crate) async fn get_timeout(
+        &self,
+        request: &Request,
+        timeout: Duration,
+    ) -> Result<Guard, Error> {
+        match safe_timeout(timeout, self.get_internal(request)).await {
             Ok(Ok(conn)) => Ok(conn),
             Err(_) => {
                 self.inner.health.toggle(false);

@@ -13,6 +13,7 @@ use super::*;
 use monitor::Monitor;
 
 mod election;
+mod replica_fallover;
 mod role_detection;
 
 fn create_test_pool_config(host: &str, port: u16) -> PoolConfig {

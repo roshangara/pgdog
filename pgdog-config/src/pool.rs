@@ -30,6 +30,10 @@ pub struct PoolConfig {
     /// How long to wait for a connection before giving up.
     #[serde_as(as = "DurationMilliSeconds")]
     pub checkout_timeout: Duration, // ms
+    /// How long a read waits for a connection from this pool before
+    /// the load balancer tries another replica.
+    #[serde_as(as = "DurationMilliSeconds")]
+    pub replica_checkout_timeout: Duration, // ms
     /// Interval duration of DNS cache refresh.
     #[serde_as(as = "DurationMilliSeconds")]
     pub dns_ttl: Duration, // ms
@@ -195,6 +199,12 @@ impl PoolConfig {
             connect_attempt_delay: general.connect_attempt_delay(),
             query_timeout: Duration::from_millis(general.query_timeout),
             checkout_timeout: Duration::from_millis(general.checkout_timeout),
+            replica_checkout_timeout: Duration::from_millis(
+                match general.replica_checkout_timeout {
+                    0 => general.checkout_timeout,
+                    timeout => timeout.min(general.checkout_timeout),
+                },
+            ),
             idle_timeout: Duration::from_millis(
                 user.idle_timeout
                     .unwrap_or(database.idle_timeout.unwrap_or(general.idle_timeout)),
@@ -259,6 +269,7 @@ impl Default for PoolConfig {
             max_primary: None,
             max_replica: None,
             checkout_timeout: Duration::from_millis(5_000),
+            replica_checkout_timeout: Duration::from_millis(5_000),
             idle_timeout: Duration::from_millis(60_000),
             idle_timeout_primary: None,
             idle_timeout_replica: None,

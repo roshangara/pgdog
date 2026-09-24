@@ -477,11 +477,37 @@ impl LoadBalancer {
         // and we have alternates.
         let bannable = candidates.len() > 1;
 
-        for target in &candidates {
+        for (i, target) in candidates.iter().enumerate() {
             if target.ban.banned() {
                 continue;
             }
-            match target.pool.get(request).await {
+
+            // Somewhere else to go: don't queue on a replica that is failing,
+            // and don't wait on this one longer than replica_checkout_timeout.
+            let fallback = candidates[i + 1..].iter().any(|other| !other.ban.banned());
+
+            if fallback && bannable && !target.health().healthy() {
+                let healthy_fallback = candidates[i + 1..]
+                    .iter()
+                    .any(|other| !other.ban.banned() && other.health().healthy());
+                if healthy_fallback {
+                    target
+                        .ban
+                        .ban(Error::PoolUnhealthy, target.pool.config().ban_timeout);
+                    continue;
+                }
+            }
+
+            let checkout = if fallback {
+                target
+                    .pool
+                    .get_timeout(request, target.pool.config().replica_checkout_timeout)
+                    .await
+            } else {
+                target.pool.get(request).await
+            };
+
+            match checkout {
                 Ok(conn) => return Ok(conn),
                 Err(Error::Offline) => {
                     continue;
