@@ -205,11 +205,12 @@ async fn test_write_without_primary_waits_checkout_timeout() {
     lb.shutdown();
 }
 
-/// The elected primary refuses connections (here: its pool is offline). The
-/// write waits for the next election instead of failing.
+/// The elected primary refuses connections (a closed port). The write
+/// waits for the next election instead of failing.
 #[tokio::test]
 async fn test_write_waits_when_primary_refuses() {
-    let lb = auto_lb(&[("127.0.0.1", 5432), ("localhost", 5432)]);
+    let lb = auto_lb(&[("127.0.0.1", 1), ("localhost", 5432)]);
+    lb.targets[0].pool.launch();
     lb.targets[1].pool.launch();
     stats(&lb.targets[0], false, 7, 500, FRESH);
     stats(&lb.targets[1], true, 0, 500, FRESH);
@@ -242,4 +243,49 @@ async fn test_write_waits_when_primary_refuses() {
     drop(conn);
 
     lb.shutdown();
+}
+
+/// A reload shuts down every pool (a new passthrough user, a changed
+/// password, SIGHUP). A write waiting on the old primary pool must end at
+/// once so it moves to the new pools, not wait out checkout_timeout for an
+/// election the old load balancer will never hold (ganjban lab P-3).
+#[tokio::test]
+async fn test_reload_ends_a_waiting_write_at_once() {
+    // Waiting after the elected primary refused.
+    let lb = auto_lb(&[("127.0.0.1", 1), ("localhost", 5432)]);
+    lb.launch();
+    stats(&lb.targets[0], false, 7, 500, FRESH);
+    stats(&lb.targets[1], true, 0, 500, FRESH);
+    assert!(lb.redetect_roles());
+
+    let write = {
+        let lb = lb.clone();
+        tokio::spawn(async move { lb.get_primary(&Request::default()).await })
+    };
+    sleep(Duration::from_millis(400)).await;
+    assert!(!write.is_finished());
+
+    lb.shutdown();
+    let result = timeout(Duration::from_millis(300), write)
+        .await
+        .expect("the write must end at once")
+        .unwrap();
+    assert!(matches!(result, Err(Error::Offline)), "{result:?}");
+
+    // Waiting with no primary elected at all.
+    let lb = auto_lb(&[("127.0.0.1", 1), ("localhost", 5432)]);
+    lb.launch();
+    let write = {
+        let lb = lb.clone();
+        tokio::spawn(async move { lb.get_primary(&Request::default()).await })
+    };
+    sleep(Duration::from_millis(200)).await;
+    assert!(!write.is_finished());
+
+    lb.shutdown();
+    let result = timeout(Duration::from_millis(300), write)
+        .await
+        .expect("the write must end at once")
+        .unwrap();
+    assert!(matches!(result, Err(Error::Offline)), "{result:?}");
 }

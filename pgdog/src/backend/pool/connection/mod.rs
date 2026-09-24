@@ -46,6 +46,9 @@ use binding::Binding;
 use mirror::Mirror;
 use multi_shard::MultiShard;
 
+/// How many configuration reloads in a row one checkout follows.
+const MAX_RELOADS: usize = 16;
+
 /// Wrapper around a server connection.
 #[derive(Default, Debug)]
 pub(crate) struct Connection {
@@ -93,17 +96,29 @@ impl Connection {
         };
 
         if connect {
-            match self.try_conn(request, route).await {
-                Ok(()) => (),
-                Err(Error::Pool(super::Error::Offline | super::Error::AllReplicasDown)) => {
-                    debug!("detected configuration reload, reloading cluster");
+            // Reloads come in bursts: after a SIGHUP each passthrough user
+            // comes back with its next client, and every one rebuilds the
+            // pools. Follow them as long as the pools we got were shut down.
+            let mut reloads = 0;
+            loop {
+                match self.try_conn(request, route).await {
+                    Ok(()) => break,
+                    Err(Error::Pool(super::Error::Offline)) if reloads < MAX_RELOADS => {
+                        debug!("detected configuration reload, reloading cluster");
+                        reloads += 1;
 
-                    // Wait to reload pools until they are ready.
-                    self.safe_reload().await?;
-                    return self.try_conn(request, route).await;
-                }
-                Err(err) => {
-                    return Err(err);
+                        // Wait to reload pools until they are ready.
+                        self.safe_reload().await?;
+                    }
+                    Err(Error::Pool(super::Error::AllReplicasDown)) if reloads == 0 => {
+                        debug!("detected configuration reload, reloading cluster");
+                        reloads += 1;
+
+                        self.safe_reload().await?;
+                    }
+                    Err(err) => {
+                        return Err(err);
+                    }
                 }
             }
 

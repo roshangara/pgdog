@@ -30,7 +30,7 @@ use crate::frontend::router::parser::Cache;
 use crate::frontend::router::sharding::{Mapping, ShardedTable};
 use crate::{
     backend::pool::PoolConfig,
-    config::{ConfigAndUsers, ShardedMappingDeprecated, User as ConfigUser, config, load, set},
+    config::{ConfigAndUsers, ShardedMappingDeprecated, User as ConfigUser, config, set},
     net::{messages::FrontendPid, tls},
 };
 
@@ -43,6 +43,10 @@ use super::{
 static DATABASES: Lazy<ArcSwap<Databases>> =
     Lazy::new(|| ArcSwap::from_pointee(Databases::default()));
 static LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+/// Users (name, database) added by passthrough authentication, not by
+/// users.toml: a reload of the configuration keeps them.
+static PASSTHROUGH_USERS: Lazy<Mutex<std::collections::HashSet<(String, String)>>> =
+    Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
 /// Sync databases during modification.
 pub(crate) fn lock() -> MutexGuard<'static, RawMutex, ()> {
@@ -152,7 +156,24 @@ pub(crate) fn reload(force: bool) -> Result<(), Error> {
 
     // Load config from disk.
     let old_config = config();
-    let new_config = load(&old_config.config_path, &old_config.users_path)?;
+    let mut new_config = ConfigAndUsers::load(&old_config.config_path, &old_config.users_path)?;
+
+    // Keep the users passthrough authentication added: the files don't name
+    // them. Dropping them tore down every pool of theirs, and the waits on
+    // them, on every reload, and their clients rebuilt them one by one.
+    // FORCE RELOAD still starts over.
+    if !force && new_config.config.general.passthrough_auth() {
+        let passthrough = PASSTHROUGH_USERS.lock();
+        for user in &old_config.users.users {
+            if passthrough.contains(&(user.name.clone(), user.database.clone()))
+                && new_config.users.find(user).is_none()
+            {
+                new_config.users.add_or_replace(user.clone());
+            }
+        }
+    }
+
+    let new_config = set(new_config)?;
     let databases = from_config(&new_config);
 
     // Terminate after checking config for validity.
@@ -290,6 +311,9 @@ pub(crate) fn store(user: ConfigUser) -> Result<AuthResult, Error> {
         );
 
         let _lock = lock();
+        PASSTHROUGH_USERS
+            .lock()
+            .insert((user.name.clone(), user.database.clone()));
         let mut config = (*config()).clone();
         config.users.add_or_replace(user);
         set(config)?;
@@ -1095,6 +1119,59 @@ mod tests {
         for (_, pool) in pools {
             assert_eq!(pool.addr().database_name, "customer_42");
         }
+    }
+
+    /// A reload of the configuration files keeps the users passthrough
+    /// authentication added: dropping them rebuilt their pools from nothing
+    /// and ended every wait on them (ganjban lab P-3). FORCE RELOAD drops them.
+    #[tokio::test]
+    async fn test_reload_keeps_passthrough_users() {
+        let dir = std::env::temp_dir().join(format!("pgdog-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("pgdog.toml");
+        let users_path = dir.join("users.toml");
+        std::fs::write(
+            &config_path,
+            "[general]\npassthrough_auth = \"enabled_plain\"\n\n\
+             [[databases]]\nname = \"*\"\nhost = \"127.0.0.1\"\nport = 5432\n",
+        )
+        .unwrap();
+        std::fs::write(&users_path, "").unwrap();
+
+        {
+            let _lock = lock();
+            let mut loaded = ConfigAndUsers::load(&config_path, &users_path).unwrap();
+            loaded.config_path = config_path.clone();
+            loaded.users_path = users_path.clone();
+            crate::config::set(loaded).unwrap();
+            replace_databases(from_config(&crate::config::config()), false).unwrap();
+        }
+
+        let user = ConfigUser {
+            name: "reload_user".to_string(),
+            database: "reload_db".to_string(),
+            password: Some("secret".to_string()),
+            ..Default::default()
+        };
+        assert!(add_verified(user, accept).await.unwrap().is_ok());
+        assert!(databases().cluster(("reload_user", "reload_db")).is_ok());
+
+        reload(false).unwrap();
+        assert!(
+            databases().cluster(("reload_user", "reload_db")).is_ok(),
+            "a reload dropped the passthrough user"
+        );
+        assert_eq!(
+            databases()
+                .passwords(("reload_user", "reload_db"))
+                .map(|passwords| passwords.len()),
+            Some(1)
+        );
+
+        reload(true).unwrap();
+        assert!(databases().cluster(("reload_user", "reload_db")).is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Needs the test database: user pgdog, password pgdog, database pgdog.

@@ -361,6 +361,12 @@ impl LoadBalancer {
     /// [`Error::NoPrimary`]. With automatic roles, the caller follows the
     /// election for up to `checkout_timeout`: it waits while there is no
     /// primary, and a wait on a primary that fails over moves to the new one.
+    ///
+    /// A configuration reload (a new passthrough user, a changed password,
+    /// SIGHUP) replaces every pool: a wait on this load balancer's pools
+    /// ends at once with [`Error::Offline`], and the caller moves to the new
+    /// ones (`Connection::connect`). There is no election to wait for here
+    /// any more.
     pub(super) async fn get_primary(&self, request: &Request) -> Result<Guard, Error> {
         if !self.role_detection_enabled() {
             return match self.primary() {
@@ -393,11 +399,16 @@ impl LoadBalancer {
                     }
                     None
                 }
+                _ = self.maintenance.cancelled() => return Err(Error::Offline),
                 _ = sleep_until(deadline) => return Err(Error::CheckoutTimeout),
             };
 
             match next {
                 Some(Ok(conn)) => return Ok(conn),
+
+                // The pool was shut down by a reload: its replacement serves
+                // the write, not a later election here.
+                Some(Err(Error::Offline)) => return Err(Error::Offline),
 
                 // The elected primary refused or timed out: for this write it
                 // is no primary. Wait for the next election, and try it again
@@ -417,6 +428,7 @@ impl LoadBalancer {
                     select! {
                         _ = new_election => (),
                         _ = retry => (),
+                        _ = self.maintenance.cancelled() => return Err(Error::Offline),
                         _ = sleep_until(deadline) => return Err(Error::CheckoutTimeout),
                     }
                 }
