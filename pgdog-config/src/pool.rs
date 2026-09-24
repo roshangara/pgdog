@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DurationMilliSeconds, serde_as};
 
 use crate::{
-    Database, EnumeratedDatabase, General, MAX_DURATION, PoolerMode, Role, User,
+    Database, EnumeratedDatabase, General, MAX_DURATION, PoolerMode, ReadWriteSplit, Role, User,
     pooling::ConnectionRecovery, prepared_statements::PreparedStatementsConfig,
 };
 
@@ -110,6 +110,8 @@ pub struct PoolConfig {
     pub replication_mode: bool,
     /// Pooler mode.
     pub pooler_mode: PoolerMode,
+    /// Read/write split of the database: its own, or the general one.
+    pub read_write_split: ReadWriteSplit,
     /// Read only mode.
     pub read_only: bool,
     /// Prepared statements config.
@@ -199,7 +201,9 @@ impl PoolConfig {
             pooler_mode: user
                 .pooler_mode
                 .unwrap_or(database.pooler_mode.unwrap_or(general.pooler_mode)),
-
+            read_write_split: database
+                .read_write_split
+                .unwrap_or(general.read_write_split),
             connect_timeout: Duration::from_millis(general.connect_timeout),
             connect_attempts: general.connect_attempts,
             connect_attempt_delay: general.connect_attempt_delay(),
@@ -303,6 +307,7 @@ impl Default for PoolConfig {
             lock_timeout: None,
             replication_mode: false,
             pooler_mode: PoolerMode::default(),
+            read_write_split: ReadWriteSplit::default(),
             read_only: false,
             prepared_statements: PreparedStatementsConfig::default(),
             stats_period: Duration::from_millis(15_000),
@@ -449,6 +454,32 @@ mod test {
             config.prepared_statements.level,
             general.prepared_statements
         );
+    }
+
+    /// A database's own read_write_split, or the general one (ganjban lab
+    /// P-4: one tenant's reads on the primary, the others' on replicas).
+    #[test]
+    fn database_read_write_split() {
+        let general = General {
+            read_write_split: ReadWriteSplit::ExcludePrimary,
+            ..General::default()
+        };
+        let database = Database {
+            read_write_split: Some(ReadWriteSplit::PreferPrimary),
+            ..Default::default()
+        };
+
+        let config = resolve(&general, &database, &User::default());
+        assert_eq!(config.read_write_split, ReadWriteSplit::PreferPrimary);
+
+        let config = resolve(&general, &Database::default(), &User::default());
+        assert_eq!(config.read_write_split, ReadWriteSplit::ExcludePrimary);
+
+        let parsed: Database = toml::from_str(
+            "name = \"tenant\"\nhost = \"127.0.0.1\"\nread_write_split = \"prefer_primary\"\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.read_write_split, Some(ReadWriteSplit::PreferPrimary));
     }
 
     #[test]

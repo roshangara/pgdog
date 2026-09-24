@@ -558,6 +558,17 @@
             "null"
           ]
         },
+        "read_write_split": {
+          "description": "Overrides the [`read_write_split`](https://docs.pgdog.dev/configuration/pgdog.toml/general/#read_write_split) setting for this database, e.g. `prefer_primary` to serve every read of one database from the primary while the others read from replicas. Every entry of the database says the same, or the first one decides.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReadWriteSplit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "resharding_only": {
           "description": "Used for resharding only; this database will not serve regular traffic.",
           "type": "boolean",

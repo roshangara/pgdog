@@ -192,6 +192,14 @@ impl ClusterShardConfig {
             .map(|replica| replica.config.pooler_mode)
             .unwrap_or_default()
     }
+
+    /// The database's read/write split: its entries' own, or the general one.
+    pub(crate) fn read_write_split(&self) -> Option<ReadWriteSplit> {
+        self.primary
+            .as_ref()
+            .or(self.replicas.first())
+            .map(|pool| pool.config.read_write_split)
+    }
 }
 
 /// Cluster creation config.
@@ -273,7 +281,10 @@ impl<'a> ClusterConfig<'a> {
             sharded_tables,
             multi_tenant,
             rw_strategy: general.read_write_strategy,
-            rw_split: general.read_write_split,
+            rw_split: shards
+                .first()
+                .and_then(|shard| shard.read_write_split())
+                .unwrap_or(general.read_write_split),
             read_after_write: Duration::from_millis(general.read_after_write_ms),
             function_routing: FunctionRouting::new(
                 &general.primary_functions,

@@ -12,6 +12,7 @@ mod batch;
 mod close_parse;
 mod close_parse_global_cache;
 mod cross_shard_disabled;
+mod database_reads;
 mod discard;
 mod extended;
 mod extended_anonymous;

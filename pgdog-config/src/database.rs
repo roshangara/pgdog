@@ -71,7 +71,9 @@ impl FromStr for LoadBalancingStrategy {
 /// How to handle the separation of read and write queries.
 ///
 /// <https://docs.pgdog.dev/configuration/pgdog.toml/general/#read_write_split>
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Copy, JsonSchema)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Copy, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReadWriteSplit {
     /// Uses the primary database as well as the replicas to serve read queries (default).
@@ -197,6 +199,8 @@ pub struct Database {
     ///
     /// <https://docs.pgdog.dev/configuration/pgdog.toml/databases/#read_only>
     pub read_only: Option<bool>,
+    /// Overrides the [`read_write_split`](https://docs.pgdog.dev/configuration/pgdog.toml/general/#read_write_split) setting for this database, e.g. `prefer_primary` to serve every read of one database from the primary while the others read from replicas. Every entry of the database says the same, or the first one decides.
+    pub read_write_split: Option<ReadWriteSplit>,
     /// Overrides the `server_lifetime` setting. Server connections older than this will be closed when returned to the pool.
     ///
     /// <https://docs.pgdog.dev/configuration/pgdog.toml/databases/#server_lifetime>
