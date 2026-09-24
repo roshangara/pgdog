@@ -3,7 +3,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -13,7 +13,7 @@ use tokio::select;
 use tokio::sync::watch;
 use tokio::time::{Instant, sleep, sleep_until};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::{config::config, net::messages::FrontendPid};
 use crate::{
@@ -37,6 +37,9 @@ mod test;
 
 /// How often a write waiting for an election retries a primary that failed.
 const PRIMARY_RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// How often stale reads are logged while they last.
+const STALE_LOG_EVERY: Duration = Duration::from_secs(30);
 
 /// Read query load balancer target.
 #[derive(Clone, Debug)]
@@ -108,6 +111,11 @@ pub(crate) struct LoadBalancer {
     pub(super) elected_primary: Arc<watch::Sender<Option<Pool>>>,
     /// Read/write split.
     pub(super) rw_split: ReadWriteSplit,
+    /// How stale reads are, in ms, while no server within ban_replica_lag
+    /// answers (the freshest replica that does serves them); 0 otherwise.
+    pub(super) stale_ms: Arc<AtomicU64>,
+    /// When staleness was last logged.
+    stale_logged: Arc<parking_lot::Mutex<Option<Instant>>>,
 }
 
 impl LoadBalancer {
@@ -160,6 +168,46 @@ impl LoadBalancer {
             maintenance: CancellationToken::new(),
             elected_primary: Arc::new(watch::Sender::new(elected)),
             rw_split,
+            stale_ms: Arc::new(AtomicU64::new(0)),
+            stale_logged: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    /// Record how stale reads are (`None`: fresh): the monitor's verdict,
+    /// logged when it changes and every 30 s while it lasts, and exported as
+    /// `reads_stale_seconds`.
+    pub(super) fn stale_reads(&self, staleness: Option<Duration>) {
+        let Some(addr) = self.targets.first().map(|target| target.pool.addr()) else {
+            return;
+        };
+        let stale_ms = staleness
+            .map(|s| (s.as_millis() as u64).max(1))
+            .unwrap_or(0);
+        let was = self.stale_ms.swap(stale_ms, Ordering::Relaxed);
+
+        match staleness {
+            Some(staleness) => {
+                crate::stats::stale_reads::set(&addr.user, &addr.database_name, staleness);
+                let mut logged = self.stale_logged.lock();
+                if was == 0 || logged.is_none_or(|at| at.elapsed() >= STALE_LOG_EVERY) {
+                    *logged = Some(Instant::now());
+                    warn!(
+                        "reads of \"{}\"/\"{}\" are {:.1} s stale: no server within ban_replica_lag answers; the freshest replica serves them",
+                        addr.user,
+                        addr.database_name,
+                        staleness.as_secs_f64()
+                    );
+                }
+            }
+            None if was != 0 => {
+                crate::stats::stale_reads::clear(&addr.user, &addr.database_name);
+                *self.stale_logged.lock() = None;
+                info!(
+                    "reads of \"{}\"/\"{}\" are fresh again",
+                    addr.user, addr.database_name
+                );
+            }
+            None => (),
         }
     }
 
@@ -516,6 +564,16 @@ impl LoadBalancer {
                     candidates.swap(0, max_idx);
                 }
             }
+        }
+
+        // No server within the bound answers: the freshest replica first.
+        if self.stale_ms.load(Ordering::Relaxed) > 0 {
+            candidates.sort_by_key(|target| {
+                (
+                    target.role() != Role::Replica,
+                    target.pool.replica_lag().duration,
+                )
+            });
         }
 
         // Only ban a candidate pool if there are more than one

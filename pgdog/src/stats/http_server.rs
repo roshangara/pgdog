@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use super::{
     Clients, ClientsLocked, Listeners, LookupMetrics, MirrorStatsMetrics, Pools, QueryCache,
-    ReadAfterWrite, TwoPc,
+    ReadAfterWrite, StaleReads, TwoPc,
 };
 use crate::tasks;
 
@@ -43,6 +43,7 @@ async fn metrics(_: Request<hyper::body::Incoming>) -> Result<Response<Full<Byte
     let query_cache = query_cache.join("\n");
     let two_pc = TwoPc::load();
     let read_after_write = ReadAfterWrite::load();
+    let stale_reads = StaleReads::load();
     let metrics_data = clients.to_string()
         + "\n"
         + &clients_locked.to_string()
@@ -59,7 +60,9 @@ async fn metrics(_: Request<hyper::body::Incoming>) -> Result<Response<Full<Byte
         + "\n"
         + &two_pc.to_string()
         + "\n"
-        + &read_after_write.to_string();
+        + &read_after_write.to_string()
+        + "\n"
+        + &stale_reads.to_string();
     let response = Response::builder()
         .header(
             hyper::header::CONTENT_TYPE,

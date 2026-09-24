@@ -124,9 +124,36 @@ fn update_replica_lag(pools: &[Pool]) {
             }
 
             let lag = calculate_replica_lag(&primary_stats, &replica_stats);
-            replica_pool.lock().replica_lag = lag;
+            replica_pool.lock().replica_lag = with_replay_age(replica_pool, &replica_stats, lag);
         }
         primary_pool.lock().replica_lag = ReplicaLag::default();
+    } else {
+        // Without a primary, a replica's own clock still says how old its
+        // data is (replica_lag_from_replay).
+        for replica_pool in pools {
+            let replica_stats = replica_pool.lsn_stats();
+            if replica_stats.replica && replica_stats.valid() {
+                let lag = replica_pool.lock().replica_lag;
+                replica_pool.lock().replica_lag =
+                    with_replay_age(replica_pool, &replica_stats, lag);
+            }
+        }
+    }
+}
+
+/// With `replica_lag_from_replay`, a replica's lag is at least the age of the
+/// last transaction it replayed, by its own clock: the lag measured against
+/// the primary stands still when the primary can't be asked (its last stats
+/// are kept), while this keeps growing.
+fn with_replay_age(pool: &Pool, stats: &LsnStats, lag: ReplicaLag) -> ReplicaLag {
+    if !pool.config().replica_lag_from_replay {
+        return lag;
+    }
+
+    let age = Duration::from_millis(stats.staleness_ms.max(0) as u64);
+    ReplicaLag {
+        duration: lag.duration.max(age),
+        bytes: lag.bytes,
     }
 }
 
@@ -210,6 +237,7 @@ mod test {
             fetched: SystemTime::now(),
             aurora: false,
             timeline: 0,
+            staleness_ms: 0,
         }
         .into()
     }
@@ -274,6 +302,54 @@ mod test {
         let primary_lag = primary.replica_lag();
         assert_eq!(primary_lag.bytes, 0);
         assert_eq!(primary_lag.duration, Duration::default());
+    }
+
+    /// ganjban lab H-5: a replica cut off from the primary keeps the lag
+    /// last measured against it (the primary's stats stand still), but its
+    /// own clock says how old its data is. With replica_lag_from_replay the
+    /// lag is at least that, with the primary's stats or without them.
+    #[test]
+    fn test_replica_lag_from_replay_age() {
+        let config = Config {
+            replica_lag_from_replay: true,
+            ..Config::default()
+        };
+        let primary = Pool::new(&PoolConfig {
+            address: Address::new_test(),
+            config,
+        });
+        let replica = Pool::new(&PoolConfig {
+            address: Address {
+                configured_role: Role::Replica,
+                ..Address::new_test()
+            },
+            config,
+        });
+
+        set_pool_lsn_stats(&primary, false, 200, "2026-07-01 13:33:10.000000+00");
+        let mut stats = lsn_stats(true, 150, "2026-07-01 13:33:09.000000+00");
+        stats.staleness_ms = 121_000;
+        *replica.inner().lsn_stats.write() = stats;
+
+        update_replica_lag(&[replica.clone(), primary.clone()]);
+        assert_eq!(replica.replica_lag().duration, Duration::from_secs(121));
+        assert_eq!(replica.replica_lag().bytes, 50);
+
+        // No primary in sight at all.
+        update_replica_lag(std::slice::from_ref(&replica));
+        assert_eq!(replica.replica_lag().duration, Duration::from_secs(121));
+
+        // Off: the lag against the primary only.
+        let off = Pool::new(&PoolConfig {
+            address: Address {
+                configured_role: Role::Replica,
+                ..Address::new_test()
+            },
+            config: Config::default(),
+        });
+        *off.inner().lsn_stats.write() = stats;
+        update_replica_lag(&[off.clone(), primary.clone()]);
+        assert_eq!(off.replica_lag().duration, Duration::from_secs(1));
     }
 
     // The shard monitor reacts to an `lsn_role_change` notification by

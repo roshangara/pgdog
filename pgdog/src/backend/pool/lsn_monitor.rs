@@ -51,7 +51,12 @@ SELECT
     CASE
         WHEN pg_is_in_recovery() THEN 0
         ELSE ('x' || substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8))::bit(32)::int
-    END AS timeline
+    END AS timeline,
+    CASE
+        WHEN pg_is_in_recovery() THEN
+            COALESCE((EXTRACT(EPOCH FROM now() - pg_last_xact_replay_timestamp()) * 1000)::bigint, 0)
+        ELSE 0
+    END AS staleness_ms
 ";
 
 static AURORA_LSN_QUERY: &str = "
@@ -60,7 +65,8 @@ SELECT
     '0/0'::pg_lsn AS lsn,
     0::bigint AS offset_bytes,
     now() AS timestamp,
-    0 AS timeline
+    0 AS timeline,
+    0::bigint AS staleness_ms
 ";
 
 /// LSN information.
@@ -112,6 +118,7 @@ impl LsnStats {
             fetched: SystemTime::now(),
             aurora,
             timeline: value.get(4, Format::Text).unwrap_or_default(),
+            staleness_ms: value.get(5, Format::Text).unwrap_or_default(),
         }
         .into()
     }
@@ -234,13 +241,11 @@ impl LsnMonitor {
             {
                 Ok(Ok(conn)) => Box::new(conn),
                 Ok(Err(err)) => {
-                    self.pool
-                        .replica_down(format!("its LSN check could not connect: {err}"));
+                    self.failed(format!("its LSN check could not connect: {err}"));
                     return Err(err);
                 }
                 Err(_) => {
-                    self.pool
-                        .replica_down("its LSN check could not connect in connect_timeout");
+                    self.failed("its LSN check could not connect in connect_timeout");
                     return Err(Error::ConnectTimeout);
                 }
             },
@@ -251,8 +256,7 @@ impl LsnMonitor {
         }
 
         let Some(aurora) = aurora_detected else {
-            self.pool
-                .replica_down("its LSN check did not answer in lsn_check_timeout");
+            self.failed("its LSN check did not answer in lsn_check_timeout");
             return Ok(None);
         };
 
@@ -268,11 +272,17 @@ impl LsnMonitor {
                 Ok(aurora_detected)
             }
             None => {
-                self.pool
-                    .replica_down("its LSN check did not answer in lsn_check_timeout");
+                self.failed("its LSN check did not answer in lsn_check_timeout");
                 Err(Error::CheckoutTimeout)
             }
         }
+    }
+
+    /// The server didn't answer its check: unhealthy (a primary that doesn't
+    /// answer is no fresh source for reads), and a replica is down.
+    fn failed(&self, reason: impl std::fmt::Display) {
+        self.pool.replica_down(reason);
+        self.pool.inner().health.toggle(false);
     }
 
     /// Keep the stats of a check.
@@ -472,6 +482,7 @@ mod test {
             fetched: SystemTime::now(),
             aurora: false,
             timeline: 0,
+            staleness_ms: 0,
         }
         .into();
 
@@ -579,6 +590,7 @@ mod test {
             fetched: SystemTime::now(),
             aurora: true,
             timeline: 0,
+            staleness_ms: 0,
         }
         .into();
 
@@ -598,6 +610,7 @@ mod test {
             fetched: SystemTime::now(),
             aurora: false,
             timeline: 0,
+            staleness_ms: 0,
         }
         .into();
 

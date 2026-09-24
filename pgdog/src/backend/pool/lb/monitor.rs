@@ -72,12 +72,24 @@ impl Monitor {
         let mut ban_targets = Vec::new();
         let targets = &self.replicas.targets;
 
+        let stale = |target: &Target| {
+            target.role() == Role::Replica
+                && target
+                    .pool
+                    .replica_lag()
+                    .greater_or_eq(replica_ban_threshold)
+        };
+
+        // Reads never fail, and stale reads are better than none: a stale
+        // replica leaves reads only while a fresh source is left, a replica
+        // within the bound or the primary, that answers.
+        let fresh_source = targets
+            .iter()
+            .any(|target| target.health().healthy() && !stale(target));
+
         for (i, target) in targets.iter().enumerate() {
             let healthy = target.health().healthy();
-            let replica_lag_bad = target
-                .pool
-                .replica_lag()
-                .greater_or_eq(replica_ban_threshold);
+            let replica_lag_bad = stale(target) && fresh_source;
 
             // Clear expired bans.
             if healthy && !replica_lag_bad {
@@ -121,6 +133,18 @@ impl Monitor {
                     .get(i)
                     .map(|target| target.ban.ban(reason, target.pool.config().ban_timeout));
             }
+        }
+
+        // No source within the bound answers: reads go to the freshest
+        // replica that does, and the door says how stale they are.
+        let freshest = targets
+            .iter()
+            .filter(|target| target.role() == Role::Replica && target.health().healthy())
+            .map(|target| target.pool.replica_lag().duration)
+            .min();
+        match freshest {
+            Some(staleness) if !fresh_source => self.replicas.stale_reads(Some(staleness)),
+            _ => self.replicas.stale_reads(None),
         }
     }
 }

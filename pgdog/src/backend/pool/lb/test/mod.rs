@@ -15,6 +15,7 @@ use monitor::Monitor;
 mod election;
 mod replica_fallover;
 mod role_detection;
+mod stale;
 
 fn create_test_pool_config(host: &str, port: u16) -> PoolConfig {
     create_test_pool_config_with_db_num(host, port, Default::default())

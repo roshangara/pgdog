@@ -528,6 +528,20 @@ pub struct General {
     #[serde(default = "General::replica_checkout_timeout")]
     pub replica_checkout_timeout: u64,
 
+    /// Measure a replica's lag on the replica too, as the age of the last
+    /// transaction it replayed by its own clock (`now() -
+    /// pg_last_xact_replay_timestamp()`): a replica cut off from the primary
+    /// is seen falling behind although the primary can't be asked. Needs a
+    /// regular write on the primary (a heartbeat), or an idle replica looks
+    /// stale. A stale replica (`ban_replica_lag`) is taken out of reads only
+    /// while a fresh source is left: another replica, or the primary; with
+    /// none, reads go to the freshest replica still answering, and the door
+    /// says how stale they are (log and `reads_stale_seconds`).
+    ///
+    /// _Default:_ `false`
+    #[serde(default = "General::replica_lag_from_replay")]
+    pub replica_lag_from_replay: bool,
+
     /// Take a replica out of reads as soon as it fails: its LSN check
     /// (`lsn_check_timeout`) or a new connection to it. Reads waiting for one
     /// of its connections move to another server at once, and a read in
@@ -969,6 +983,7 @@ impl Default for General {
             read_after_write_ms: Self::read_after_write_ms(),
             replica_checkout_timeout: Self::replica_checkout_timeout(),
             replica_down_detection: Self::replica_down_detection(),
+            replica_lag_from_replay: Self::replica_lag_from_replay(),
             primary_functions: Vec::new(),
             route_unknown_functions_to_primary: Self::route_unknown_functions_to_primary(),
             tls_certificate: Self::tls_certificate(),
@@ -1393,6 +1408,10 @@ impl General {
 
     fn replica_down_detection() -> bool {
         Self::env_bool_or_default("PGDOG_REPLICA_DOWN_DETECTION", false)
+    }
+
+    fn replica_lag_from_replay() -> bool {
+        Self::env_bool_or_default("PGDOG_REPLICA_LAG_FROM_REPLAY", false)
     }
 
     fn read_after_write_ms() -> u64 {

@@ -103,6 +103,11 @@ pub struct LsnStats {
     /// 0 on replicas and on Aurora.
     #[serde(default)]
     pub timeline: i64,
+    /// On a replica, how old the last transaction it replayed is, by its own
+    /// clock (`now() - pg_last_xact_replay_timestamp()`), in milliseconds:
+    /// measured without the primary. 0 on a primary and before any replay.
+    #[serde(default)]
+    pub staleness_ms: i64,
 }
 
 /// Schema-only mirror of `std::time::SystemTime`'s default serde representation.
@@ -129,6 +134,7 @@ impl Default for LsnStats {
             fetched: SystemTime::now(),
             aurora: false,
             timeline: 0,
+            staleness_ms: 0,
         }
     }
 }
