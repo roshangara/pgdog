@@ -97,6 +97,9 @@ pub(crate) struct Route {
     /// A user-defined function with side effects is not detected and is
     /// treated as a read.
     mutates: bool,
+    /// A read sent to the primary because the client wrote recently
+    /// (`read_after_write_ms`).
+    read_after_write: bool,
     /// `ORDER BY` clause, transformed into something
     /// we can quickly use to sort the result.
     order_by: Vec<OrderBy>,
@@ -208,6 +211,17 @@ impl Route {
     /// what is and isn't detected.
     pub(crate) fn mutates(&self) -> bool {
         self.mutates
+    }
+
+    /// Send this read to the primary because the client wrote recently.
+    pub(crate) fn set_read_after_write(&mut self) {
+        self.read = false;
+        self.read_after_write = true;
+    }
+
+    /// This read goes to the primary because the client wrote recently.
+    pub(crate) fn is_read_after_write(&self) -> bool {
+        self.read_after_write
     }
 
     /// Set whether the statement changes data or schema.

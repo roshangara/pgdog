@@ -8,7 +8,9 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use super::otel;
-use super::{Clients, ClientsLocked, Listeners, MirrorStatsMetrics, Pools, QueryCache, TwoPc};
+use super::{
+    Clients, ClientsLocked, Listeners, MirrorStatsMetrics, Pools, QueryCache, ReadAfterWrite, TwoPc,
+};
 use crate::util::safe_sleep;
 use crate::{config::config, tasks};
 
@@ -47,8 +49,10 @@ pub(crate) async fn run() {
         let listeners = Listeners::load();
         let query_cache = QueryCache::load().metrics();
         let two_pc = TwoPc::load();
+        let read_after_write = ReadAfterWrite::load();
 
-        let mut all: Vec<&super::Metric> = vec![&clients, &clients_locked, &two_pc];
+        let mut all: Vec<&super::Metric> =
+            vec![&clients, &clients_locked, &two_pc, &read_after_write];
         all.extend(pools.iter());
         all.extend(mirror.iter());
         all.extend(listeners.iter());

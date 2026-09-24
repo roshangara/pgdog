@@ -175,6 +175,12 @@ impl QueryParserTest {
         self
     }
 
+    /// The client wrote recently (`read_after_write_ms`).
+    pub(crate) fn with_read_after_write(mut self) -> Self {
+        self.sticky.read_after_write = true;
+        self
+    }
+
     /// Set a parameter value.
     pub(crate) fn with_param(
         mut self,

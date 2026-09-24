@@ -15,6 +15,10 @@ pub(crate) struct Sticky {
     /// Desired database role. This comes from `target_session_attrs`
     /// provided by the client.
     pub(crate) role: Option<Role>,
+
+    /// The client wrote recently, so its reads go to the primary
+    /// (`read_after_write_ms`). Set by the query engine for each request.
+    pub(crate) read_after_write: bool,
 }
 
 impl Default for Sticky {
@@ -34,6 +38,7 @@ impl Sticky {
         Self {
             omni_index: 1,
             role: None,
+            read_after_write: false,
         }
     }
 
@@ -51,6 +56,7 @@ impl Sticky {
         Self {
             omni_index: rng().random_range(1..usize::MAX),
             role,
+            read_after_write: false,
         }
     }
 }

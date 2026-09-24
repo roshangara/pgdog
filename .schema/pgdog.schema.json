@@ -98,6 +98,7 @@
         "query_size_limit": null,
         "query_size_limit_action": "warn",
         "query_timeout": 9223372036854775807,
+        "read_after_write_ms": 0,
         "read_write_split": "include_primary",
         "read_write_strategy": "conservative",
         "regex_parser_limit": 1000,
@@ -1165,6 +1166,13 @@
           "type": "integer",
           "format": "uint64",
           "default": 9223372036854775807,
+          "minimum": 0
+        },
+        "read_after_write_ms": {
+          "description": "After a client runs a statement or transaction that writes, send its reads to the primary\nfor this many milliseconds, so it reads its own writes even if replicas lag behind.\nThe window starts when the writing statement (or its transaction) finishes. `0` disables it.\n\n_Default:_ `0`",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
           "minimum": 0
         },
         "read_write_split": {

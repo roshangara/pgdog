@@ -255,6 +255,7 @@ impl QueryEngine {
             }
 
             self.stats.idle(context.in_transaction());
+            self.read_after_write.ready(context.in_transaction());
             // N.B. Call this before self.cleanup_backend(), since `cleanup_backend()` resets
             // the router and the command state.
             self.advisory_locks

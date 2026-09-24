@@ -30,6 +30,7 @@ pub(crate) mod notify_buffer;
 pub(crate) mod pub_sub;
 pub(crate) mod query;
 mod query_log_stdout;
+pub(crate) mod read_after_write;
 pub(crate) mod result;
 pub(crate) mod rewrite;
 pub(crate) mod route_query;
@@ -48,6 +49,7 @@ use self::query_log_stdout::log_query_stdout;
 pub(crate) use advisory_lock::AdvisoryLocks;
 pub(crate) use context::QueryEngineContext;
 use notify_buffer::NotifyBuffer;
+use read_after_write::ReadAfterWrite;
 pub(crate) use result::QueryEngineResult;
 pub(crate) use split::Pipeline;
 pub(in crate::frontend) use temp_table::TempTableChange;
@@ -75,6 +77,8 @@ pub(crate) struct QueryEngine {
     // or disconnect.
     manual_lock: bool,
     temp_tables: TempTables,
+    // Keeps the client's reads on the primary after it wrote.
+    read_after_write: ReadAfterWrite,
 }
 
 impl QueryEngine {
@@ -103,6 +107,7 @@ impl QueryEngine {
             advisory_locks: AdvisoryLocks::default(),
             manual_lock: false,
             temp_tables: Default::default(),
+            read_after_write: ReadAfterWrite::default(),
         })
     }
 

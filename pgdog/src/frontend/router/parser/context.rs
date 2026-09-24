@@ -112,6 +112,15 @@ impl<'a> QueryParserContext<'a> {
             || (self.prefer_primary && role != Some(Role::Replica))
     }
 
+    /// The client asked for a replica explicitly, in a query comment
+    /// or with the `pgdog.role` parameter.
+    pub(super) fn replica_requested(&self) -> bool {
+        let comment = self.router_context.ast.and_then(|ast| ast.comment_role);
+        let parameter = self.router_context.parameter_hints.compute_role();
+
+        comment == Some(Role::Replica) || parameter == Some(Role::Replica)
+    }
+
     /// Are we using the conservative read/write separation strategy?
     pub(super) fn rw_conservative(&self) -> bool {
         self.rw_strategy == &ReadWriteStrategy::Conservative

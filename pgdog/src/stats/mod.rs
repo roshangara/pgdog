@@ -13,6 +13,7 @@ pub(crate) mod listeners;
 pub(crate) mod logger;
 pub(crate) mod memory;
 pub(crate) mod query_cache;
+pub(crate) mod read_after_write;
 pub(crate) mod two_pc;
 
 pub(crate) use clients::Clients;
@@ -23,4 +24,5 @@ pub(crate) use lookup::LookupMetrics;
 pub(crate) use mirror_stats::MirrorStatsMetrics;
 pub(crate) use pools::Pools;
 pub(crate) use query_cache::QueryCache;
+pub(crate) use read_after_write::ReadAfterWrite;
 pub(crate) use two_pc::TwoPc;

@@ -246,6 +246,14 @@ pub struct General {
     #[serde(default)]
     pub read_write_split: ReadWriteSplit,
 
+    /// After a client runs a statement or transaction that writes, send its reads to the primary
+    /// for this many milliseconds, so it reads its own writes even if replicas lag behind.
+    /// The window starts when the writing statement (or its transaction) finishes. `0` disables it.
+    ///
+    /// _Default:_ `0`
+    #[serde(default = "General::read_after_write_ms")]
+    pub read_after_write_ms: u64,
+
     /// Path to the TLS certificate PgDog will use to setup TLS connections with clients.
     ///
     /// <https://docs.pgdog.dev/configuration/pgdog.toml/general/#tls_certificate>
@@ -923,6 +931,7 @@ impl Default for General {
             load_balancing_strategy: Self::load_balancing_strategy(),
             read_write_strategy: Self::read_write_strategy(),
             read_write_split: Self::read_write_split(),
+            read_after_write_ms: Self::read_after_write_ms(),
             tls_certificate: Self::tls_certificate(),
             tls_private_key: Self::tls_private_key(),
             tls_client_required: bool::default(),
@@ -1337,6 +1346,10 @@ impl General {
 
     fn read_write_split() -> ReadWriteSplit {
         Self::env_enum_or_default("PGDOG_READ_WRITE_SPLIT")
+    }
+
+    fn read_after_write_ms() -> u64 {
+        Self::env_or_default("PGDOG_READ_AFTER_WRITE_MS", 0)
     }
 
     fn prepared_statements() -> PreparedStatementsLevel {

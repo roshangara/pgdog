@@ -100,6 +100,8 @@ impl QueryParser {
             Command::default()
         };
 
+        let is_query = matches!(command, Command::Query(_));
+
         match &mut command {
             Command::Query(route) | Command::Set { route, .. } => {
                 if route.is_cross_shard() && context.shards == 1 {
@@ -156,6 +158,13 @@ impl QueryParser {
                         Role::Primary => route.set_read(false),
                         _ => route.set_read(true),
                     }
+                } else if is_query
+                    && route.is_read()
+                    && context.router_context.sticky.read_after_write
+                    && !context.replica_requested()
+                {
+                    // The client wrote recently: let it read its own writes.
+                    route.set_read_after_write();
                 }
             }
 

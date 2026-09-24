@@ -83,12 +83,15 @@ impl QueryEngine {
             }
         };
 
+        let mut sticky = context.sticky;
+        sticky.read_after_write = self.read_after_write.active();
+
         let router_context = RouterContext::new(
             context.client_request,
             cluster,
             context.params,
             context.transaction,
-            context.sticky,
+            sticky,
         )?;
         let mut result = self.router.query(router_context).map(|_| ());
 
@@ -109,7 +112,7 @@ impl QueryEngine {
                             cluster,
                             context.params,
                             context.transaction,
-                            context.sticky,
+                            sticky,
                         )?
                         .with_resolved_lookups(resolved);
                         result = self.router.query(router_context).map(|_| ());
@@ -142,6 +145,11 @@ impl QueryEngine {
             Ok(()) => {
                 let command = self.router.command();
                 context.client_request.route = Some(command.route().clone());
+
+                if context.client_request.is_executable() {
+                    self.read_after_write
+                        .routed(command, cluster.read_after_write());
+                }
                 trace!(
                     "routing {:#?} to {:#?}",
                     context.client_request.messages, command,
