@@ -14,12 +14,17 @@ fn advisory_locks_from_func_call(
     bind: Option<StatementParameters<'_>>,
     values_columns: Option<&ValuesColumns<'_>>,
 ) -> Vec<AdvisoryLock> {
-    let mut name_parts = func.funcname().into_iter().filter_map(Node::as_str);
-
-    if func.funcname().len() != 1 {
-        return Vec::new();
-    }
-    let name = name_parts.next().unwrap();
+    // `pg_advisory_lock(...)` or `pg_catalog.pg_advisory_lock(...)`: a
+    // function of that name in another schema is not the built-in.
+    let name = match func
+        .funcname()
+        .into_iter()
+        .filter_map(Node::as_str)
+        .collect::<Vec<_>>()[..]
+    {
+        [name] | ["pg_catalog", name] => name,
+        _ => return Vec::new(),
+    };
 
     let (unlock, scope) = match name {
         "pg_advisory_lock"
@@ -32,7 +37,7 @@ fn advisory_locks_from_func_call(
         | "pg_try_advisory_xact_lock_shared" => (false, LockScope::Transaction),
         // Session-scoped unlocks. xact locks can't be released by name;
         // Postgres drops them automatically at COMMIT/ROLLBACK.
-        "pg_advisory_unlock" => (true, LockScope::Session),
+        "pg_advisory_unlock" | "pg_advisory_unlock_shared" => (true, LockScope::Session),
         "pg_advisory_unlock_all" => {
             return vec![AdvisoryLock::unlock_all()];
         }
@@ -710,14 +715,15 @@ impl<'a, 'b: 'a, 'c> StatementParser<'a, 'b, 'c> {
             }
 
             // Extract any advisory locks that this function call may
-            // represent, using the values clause of the current statement
+            // represent, using the values clause of the current statement,
+            // and look in its arguments: `SELECT f(pg_advisory_lock(1))`.
             Node::FuncCall(func) => {
                 walk.advisory_locks.extend(advisory_locks_from_func_call(
                     func,
                     self.bind,
                     values_columns.as_ref(),
                 ));
-                Recurse::no()
+                Recurse::yes()
             }
 
             Node::RangeVar(r) => {
@@ -3119,6 +3125,41 @@ mod test {
             assert!(locks("SELECT other.pg_advisory_lock(1)").is_empty());
             // Unrelated functions.
             assert!(locks("SELECT 1, now()").is_empty());
+        }
+
+        /// ganjban lab P-8: the built-in called schema-qualified, with an
+        /// expression as its key, nested in another call, or shared.
+        #[test]
+        fn qualified_expression_nested_and_shared() {
+            assert_eq!(
+                locks("SELECT pg_catalog.pg_advisory_lock(434343)"),
+                vec![session(Some(434343), false)],
+            );
+            assert_eq!(
+                locks("SELECT pg_catalog.pg_advisory_unlock(434343)"),
+                vec![session(Some(434343), true)],
+            );
+            // A key we can't read: a lock with no id, never an unlock-all.
+            assert_eq!(
+                locks("SELECT pg_advisory_lock(hashtext('compat-lock'))"),
+                vec![session(None, false)],
+            );
+            assert_eq!(
+                locks("SELECT pg_catalog.pg_advisory_unlock(hashtext('compat-lock'))"),
+                vec![session(None, true)],
+            );
+            assert_eq!(
+                locks("SELECT coalesce(pg_try_advisory_lock(5)::text, 'x')"),
+                vec![session(Some(5), false)],
+            );
+            assert_eq!(
+                locks("SELECT format('%s', pg_advisory_lock(6))"),
+                vec![session(Some(6), false)],
+            );
+            assert_eq!(
+                locks("SELECT pg_advisory_unlock_shared(7)"),
+                vec![session(Some(7), true)],
+            );
         }
 
         #[test]

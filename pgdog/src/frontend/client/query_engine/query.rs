@@ -258,9 +258,13 @@ impl QueryEngine {
             self.stats.idle(context.in_transaction());
             self.read_after_write.ready(context.in_transaction());
             // N.B. Call this before self.cleanup_backend(), since `cleanup_backend()` resets
-            // the router and the command state.
-            self.advisory_locks
-                .merge(self.router.command().route().advisory_locks());
+            // the router and the command state. A request that parses or
+            // describes a statement without executing it takes or releases
+            // no lock: the Execute that follows does.
+            if context.client_request.executes() {
+                self.advisory_locks
+                    .merge(self.router.command().route().advisory_locks());
+            }
 
             if let Some(change) = self.router.command().route().temp_table_change.as_ref() {
                 self.temp_tables.update(change, context.in_transaction());

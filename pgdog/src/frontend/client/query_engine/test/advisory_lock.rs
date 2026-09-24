@@ -239,3 +239,111 @@ async fn test_xact_lock_released_on_rollback() {
     assert_eq!(locks.len(), 0);
     assert!(!client.backend_locked());
 }
+
+// ganjban lab P-8: locks the door did not track.
+
+/// The first column of the only row the query returns.
+async fn scalar(client: &mut TestClient, query: &str) -> String {
+    use crate::{expect_message, net::DataRow};
+
+    client.send_simple(Query::new(query)).await;
+    let mut value = None;
+    loop {
+        let message = client.read().await;
+        match message.code() {
+            'D' => value = expect_message!(message, DataRow).get_text(0),
+            'E' => panic!("{query}: {message:?}"),
+            'Z' => return value.expect("a row"),
+            _ => (),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_expression_key_pins_until_released() {
+    let mut client = TestClient::new_replicas(Parameters::default()).await;
+    let mut other = TestClient::new_replicas(Parameters::default()).await;
+
+    for (lock, unlock) in [
+        (
+            "SELECT pg_advisory_lock(hashtext('p8-expression'))",
+            "SELECT pg_advisory_unlock(hashtext('p8-expression'))",
+        ),
+        (
+            "SELECT pg_catalog.pg_advisory_lock(4343431)",
+            "SELECT pg_catalog.pg_advisory_unlock(4343431)",
+        ),
+    ] {
+        let try_lock = lock.replace("pg_advisory_lock", "pg_try_advisory_lock");
+        let try_unlock = unlock.to_owned();
+
+        scalar(&mut client, lock).await;
+        assert!(client.backend_locked(), "{lock}");
+        let pid = client.backend_pid().await;
+        assert_eq!(client.backend_pid().await, pid, "{lock}: moved backends");
+
+        // Mutual exclusion holds: another client can't take it.
+        assert_eq!(scalar(&mut other, &try_lock).await, "f", "{lock}");
+
+        assert_eq!(scalar(&mut client, unlock).await, "t", "{unlock}");
+        assert!(!client.backend_locked(), "{unlock}: still pinned");
+
+        // Released on the server, not left on a pooled connection.
+        assert_eq!(scalar(&mut other, &try_lock).await, "t", "{lock}");
+        assert_eq!(scalar(&mut other, &try_unlock).await, "t", "{unlock}");
+    }
+}
+
+#[tokio::test]
+async fn test_lock_taken_twice_needs_two_releases() {
+    let mut client = TestClient::new_replicas(Parameters::default()).await;
+
+    scalar(&mut client, "SELECT pg_advisory_lock(4401)").await;
+    scalar(&mut client, "SELECT pg_advisory_lock(4401)").await;
+    assert_eq!(
+        scalar(&mut client, "SELECT pg_advisory_unlock(4401)").await,
+        "t"
+    );
+    assert!(client.backend_locked(), "the server still holds one level");
+    assert_eq!(
+        scalar(&mut client, "SELECT pg_advisory_unlock(4401)").await,
+        "t"
+    );
+    assert!(!client.backend_locked());
+}
+
+/// pgx's statement cache and lib/pq with arguments parse a statement in a
+/// request of its own: the unlock must run on the pinned backend.
+#[tokio::test]
+async fn test_unlock_parsed_in_its_own_round_trip() {
+    use crate::{expect_message, net::DataRow};
+
+    let mut client = TestClient::new_replicas(Parameters::default()).await;
+
+    scalar(&mut client, "SELECT pg_advisory_lock(4402)").await;
+    assert!(client.backend_locked());
+
+    client
+        .send(Parse::named("p8_unlock", "SELECT pg_advisory_unlock(4402)"))
+        .await;
+    client.send(Describe::new_statement("p8_unlock")).await;
+    client.send(Sync).await;
+    client.try_process().await.unwrap();
+    client.read_until('Z').await.unwrap();
+    assert!(client.backend_locked(), "parsing released nothing");
+
+    client.send(Bind::new_statement("p8_unlock")).await;
+    client.send(Execute::new()).await;
+    client.send(Sync).await;
+    client.try_process().await.unwrap();
+    let messages = client.read_until('Z').await.unwrap();
+    let row = messages
+        .into_iter()
+        .find(|message| message.code() == 'D')
+        .expect("a row");
+    assert_eq!(
+        expect_message!(row, DataRow).get_text(0).as_deref(),
+        Some("t")
+    );
+    assert!(!client.backend_locked());
+}

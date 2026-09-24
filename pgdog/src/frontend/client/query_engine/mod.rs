@@ -297,6 +297,14 @@ impl QueryEngine {
             Command::Split(queries) => return Ok(Self::build_simple_split(queries)),
         }
 
+        // A released advisory lock may have been the client's last one.
+        if self.advisory_locks.needs_verification()
+            && !context.in_transaction()
+            && self.backend.connected()
+        {
+            self.verify_advisory_locks(context).await?;
+        }
+
         self.hooks.after_execution(context)?;
 
         if context.in_error() {
