@@ -15,6 +15,7 @@ use crate::{
 use futures::future::join_all;
 
 use super::*;
+use crate::net::Liveness;
 use crate::util::safe_sleep;
 
 /// The server(s) the client is connected to.
@@ -45,17 +46,33 @@ impl Binding {
     /// Close connections and indicate to servers that
     /// they are probably broken and should not be re-used.
     pub(crate) fn force_close(&mut self) {
-        match self {
-            Binding::Direct(guard, _) => guard.stats_mut().state(State::ForceClose),
-            Binding::MultiShard(guards, _) => {
-                for guard in guards {
-                    guard.stats_mut().state(State::ForceClose);
-                }
+        // Keep a connection that failed marked as failed: its pool learns
+        // about the failure when it's checked in.
+        let close = |guard: &mut Guard| {
+            if guard.stats().get_state() != State::Error {
+                guard.stats_mut().state(State::ForceClose);
             }
+        };
+
+        match self {
+            Binding::Direct(guard, _) => close(guard),
+            Binding::MultiShard(guards, _) => guards.iter_mut().for_each(close),
             _ => (),
         }
 
         self.disconnect();
+    }
+
+    /// No server connection has anything waiting to be read, like a FATAL
+    /// sent while it was idle, or has been closed by the server.
+    pub(crate) fn clean(&mut self) -> bool {
+        match self {
+            Binding::Direct(guard, _) => guard.liveness() == Liveness::Clean,
+            Binding::MultiShard(guards, _) => guards
+                .iter_mut()
+                .all(|guard| guard.liveness() == Liveness::Clean),
+            _ => true,
+        }
     }
 
     /// Are we connected to a backend?

@@ -3,7 +3,11 @@ use crate::util::safe_timeout;
 
 use super::*;
 
-use tracing::{error, trace};
+use tracing::{error, trace, warn};
+
+/// How many times a server connection lost before the client's statement
+/// was sent is replaced, per statement.
+const MAX_REPLACED_CONNECTIONS: usize = 3;
 
 impl QueryEngine {
     /// Connect to backend, if necessary.
@@ -37,56 +41,83 @@ impl QueryEngine {
         self.stats.waiting(request.created_at);
         self.comms.update_stats(self.stats);
 
-        let connected = match self.backend.connect(&request, connect_route).await {
-            Ok(_) => {
-                self.stats.connected();
-                self.debug_connected(context, false);
+        let mut result = self.backend.connect(&request, connect_route).await;
+        let mut replaced = 0;
 
-                let query_timeout = context.timeouts.query_timeout(&self.stats.state);
-                let begin_stmt = self.begin_stmt.take();
+        let connected = loop {
+            match result {
+                Ok(_) => {
+                    self.stats.connected();
+                    self.debug_connected(context, false);
 
-                // We may need to sync params with the server and that reads from the socket.
-                safe_timeout(
-                    query_timeout,
-                    self.backend.link_client(
-                        context.id,
-                        context.params,
-                        begin_stmt.as_ref().map(|stmt| stmt.query()),
-                    ),
-                )
-                .await??;
+                    let query_timeout = context.timeouts.query_timeout(&self.stats.state);
 
-                true
-            }
+                    // We may need to sync params with the server and that reads from the socket.
+                    let linked = safe_timeout(
+                        query_timeout,
+                        self.backend.link_client(
+                            context.id,
+                            context.params,
+                            self.begin_stmt.as_ref().map(|stmt| stmt.query()),
+                        ),
+                    )
+                    .await?;
 
-            Err(err) => {
-                self.stats.error();
-                let can_recover = self
-                    .backend
-                    .cluster()
-                    .map(|cluster| cluster.client_connection_recovery().can_recover())
-                    .unwrap_or_default();
+                    // Nothing of the client's statement has been sent yet. A server
+                    // connection that failed, or is closing (a FATAL it sent while
+                    // idle), can't have run it: use another one. For a write, that
+                    // is the elected primary, after waiting for an election.
+                    let lost = match linked {
+                        Ok(_) => !self.backend.clean(),
+                        Err(ref err) => err.is_retryable(),
+                    };
 
-                if err.no_server() && can_recover {
-                    error!("{} [{:?}]", err, context.stream.peer_addr());
+                    if lost && replaced < MAX_REPLACED_CONNECTIONS {
+                        replaced += 1;
+                        warn!(
+                            "server connection lost before the statement was sent, using another [{:?}]",
+                            context.stream.peer_addr()
+                        );
+                        self.backend.force_close();
+                        result = self.backend.connect(&request, connect_route).await;
+                        continue;
+                    }
 
-                    let error = ErrorResponse::from_err(&err);
+                    self.begin_stmt = None;
+                    linked?;
 
-                    self.hooks.on_engine_error(context, &error)?;
-
-                    let bytes_sent = context
-                        .stream
-                        .error(error, context.in_transaction())
-                        .await?;
-
-                    self.stats.sent(bytes_sent);
-                    self.backend.disconnect();
-                    self.router.reset();
-                } else {
-                    return Err(err.into());
+                    break true;
                 }
 
-                false
+                Err(err) => {
+                    self.stats.error();
+                    let can_recover = self
+                        .backend
+                        .cluster()
+                        .map(|cluster| cluster.client_connection_recovery().can_recover())
+                        .unwrap_or_default();
+
+                    if err.no_server() && can_recover {
+                        error!("{} [{:?}]", err, context.stream.peer_addr());
+
+                        let error = ErrorResponse::from_err(&err);
+
+                        self.hooks.on_engine_error(context, &error)?;
+
+                        let bytes_sent = context
+                            .stream
+                            .error(error, context.in_transaction())
+                            .await?;
+
+                        self.stats.sent(bytes_sent);
+                        self.backend.disconnect();
+                        self.router.reset();
+                    } else {
+                        return Err(err.into());
+                    }
+
+                    break false;
+                }
             }
         };
 

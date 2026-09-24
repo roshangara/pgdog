@@ -23,6 +23,7 @@ mod lock_session;
 mod manual_lock;
 mod multi_binding;
 mod multi_statement;
+mod no_retry_after_send;
 mod omni;
 mod pipeline_execution;
 pub(crate) mod prelude;
