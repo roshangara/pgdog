@@ -51,6 +51,12 @@ impl MessageBuffer {
         self.buffer.capacity()
     }
 
+    /// Bytes read from the socket that no message has taken yet: the start
+    /// of the next message, or all of it.
+    pub(crate) fn has_data(&self) -> bool {
+        !self.buffer.is_empty()
+    }
+
     async fn read_internal(
         &mut self,
         stream: &mut (impl Unpin + AsyncReadExt),

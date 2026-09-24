@@ -803,7 +803,19 @@ impl Server {
             .unwrap_or(false)
     }
 
+    /// Whether the connection can take a statement: nothing unread from
+    /// the server, and not closed.
+    ///
+    /// An idle connection has nothing more to say. Anything already read
+    /// and not taken counts: a backend that dies right after answering (its
+    /// postmaster gone) sends its FATAL at once, and the read that took the
+    /// answer's ReadyForQuery often took the FATAL with it into this buffer,
+    /// where no look at the socket can see it.
     pub(crate) fn liveness(&mut self) -> Liveness {
+        if self.stream_buffer.has_data() {
+            return Liveness::DataPending;
+        }
+
         self.stream
             .as_mut()
             .map(|stream| stream.liveness())
@@ -1464,6 +1476,59 @@ pub(crate) mod test {
         drop(peer);
 
         wait_for_liveness(&mut server, Liveness::Closed).await;
+    }
+
+    /// A backend whose postmaster died answers the statement it was running,
+    /// then sends its FATAL at once: the read that took the ReadyForQuery
+    /// takes the FATAL too. The connection must not look reusable (ganjban
+    /// lab S01: 57P01 on statements sent 11-17 ms after a postmaster kill).
+    #[tokio::test]
+    async fn test_liveness_sees_a_fatal_read_with_the_last_answer() {
+        use crate::net::ToBytes;
+
+        let (mut server, mut peer) = server_with_peer().await;
+
+        let fatal = {
+            let mut payload = bytes::BytesMut::new();
+            for (field, value) in [
+                (b'S', "FATAL"),
+                (b'V', "FATAL"),
+                (b'C', "57P01"),
+                (
+                    b'M',
+                    "terminating connection due to unexpected postmaster exit",
+                ),
+            ] {
+                payload.put_u8(field);
+                payload.put_slice(value.as_bytes());
+                payload.put_u8(0);
+            }
+            payload.put_u8(0);
+            let mut message = bytes::BytesMut::new();
+            message.put_u8(b'E');
+            message.put_i32(payload.len() as i32 + 4);
+            message.put_slice(&payload);
+            message
+        };
+
+        server
+            .send(&vec![ProtocolMessage::from(Query::new("SELECT 1"))].into())
+            .await
+            .unwrap();
+
+        let mut answer = CommandComplete::new("SELECT 1").to_bytes().to_vec();
+        answer.extend_from_slice(&ReadyForQuery::idle().to_bytes());
+        answer.extend_from_slice(&fatal);
+        peer.write_all(&answer).await.unwrap();
+        peer.flush().await.unwrap();
+
+        assert_eq!(server.read().await.unwrap().code(), 'C');
+        assert_eq!(server.read().await.unwrap().code(), 'Z');
+        assert!(server.done());
+
+        // The FATAL is in our buffer, not on the socket.
+        assert_eq!(server.liveness(), Liveness::DataPending);
+        drop(peer);
     }
 
     #[tokio::test]
