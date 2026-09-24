@@ -34,6 +34,9 @@ pub struct PoolConfig {
     /// the load balancer tries another replica.
     #[serde_as(as = "DurationMilliSeconds")]
     pub replica_checkout_timeout: Duration, // ms
+    /// A replica that fails its LSN check or a new connection is taken out
+    /// of reads at once.
+    pub replica_down_detection: bool,
     /// Interval duration of DNS cache refresh.
     #[serde_as(as = "DurationMilliSeconds")]
     pub dns_ttl: Duration, // ms
@@ -199,6 +202,7 @@ impl PoolConfig {
             connect_attempt_delay: general.connect_attempt_delay(),
             query_timeout: Duration::from_millis(general.query_timeout),
             checkout_timeout: Duration::from_millis(general.checkout_timeout),
+            replica_down_detection: general.replica_down_detection,
             replica_checkout_timeout: Duration::from_millis(
                 match general.replica_checkout_timeout {
                     0 => general.checkout_timeout,
@@ -270,6 +274,7 @@ impl Default for PoolConfig {
             max_replica: None,
             checkout_timeout: Duration::from_millis(5_000),
             replica_checkout_timeout: Duration::from_millis(5_000),
+            replica_down_detection: false,
             idle_timeout: Duration::from_millis(60_000),
             idle_timeout_primary: None,
             idle_timeout_replica: None,

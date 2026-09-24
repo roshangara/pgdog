@@ -105,6 +105,7 @@
         "regex_parser_limit": 1000,
         "reload_schema_on_ddl": true,
         "replica_checkout_timeout": 0,
+        "replica_down_detection": false,
         "require_healthcheck_on_discovery": false,
         "resharding_copy_format": "binary",
         "resharding_copy_retry_max_attempts": 5,
@@ -1214,6 +1215,11 @@
           "format": "uint64",
           "default": 0,
           "minimum": 0
+        },
+        "replica_down_detection": {
+          "description": "Take a replica out of reads as soon as it fails: its LSN check\n(`lsn_check_timeout`) or a new connection to it. Reads waiting for one\nof its connections move to another server at once, and a read in\nflight on it that can run again elsewhere does (outside a transaction,\nnothing but the answer's header sent to the client yet).\n\n_Default:_ `false`",
+          "type": "boolean",
+          "default": false
         },
         "require_healthcheck_on_discovery": {
           "description": "Should newly added servers require a successful healthcheck before serving traffic?\n\n_Default_: `false`\n\n<https://docs.pgdog.dev/configuration/pgdog.toml/general/#require_healthcheck_on_discovery>",

@@ -492,6 +492,11 @@ impl Connection {
         Some(pool.addr().clone())
     }
 
+    /// Changes when the replica this client is on is found down.
+    pub(crate) fn replica_down_watch(&self) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.replica_target().map(|(_, pool)| pool.down_watch())
+    }
+
     /// The load balancer target of the replica this client is on.
     fn replica_target(&self) -> Option<(super::lb::ban::Ban, super::Pool)> {
         let Binding::Direct(guard, shard) = &self.binding else {

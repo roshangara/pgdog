@@ -33,6 +33,7 @@ mod pub_sub;
 mod read_after_write;
 mod read_retry;
 mod reload;
+mod replica_down;
 mod replicas;
 mod rewrite_extended;
 mod rewrite_insert_split;

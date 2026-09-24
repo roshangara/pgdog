@@ -91,10 +91,18 @@ impl QueryEngine {
             // that failed: the new server's copy of it isn't sent again.
             self.answer.replay = std::mem::take(&mut self.answer.sent).into();
 
+            // A read that can run again stops waiting for a replica found
+            // down (replica_down_detection) and runs elsewhere.
+            let down = if retry_read {
+                self.backend.replica_down_watch()
+            } else {
+                None
+            };
+
             let result = tokio::select! {
                 result = safe_timeout(
                     query_timeout,
-                    self.client_server_exchange(context, planner),
+                    self.client_server_exchange(context, planner, down),
                 ) => {
                     result
                 }
@@ -170,6 +178,7 @@ impl QueryEngine {
         &mut self,
         context: &mut QueryEngineContext<'_>,
         rewrite_result: Option<RewriteResult>,
+        mut down: Option<tokio::sync::watch::Receiver<u64>>,
     ) -> Result<(), Error> {
         match rewrite_result {
             Some(RewriteResult::InsertSplit(requests)) => {
@@ -186,7 +195,15 @@ impl QueryEngine {
                     && !self.backend.in_copy_mode()
                     && !self.streaming
                 {
-                    let message = self.read_server_message().await?;
+                    let message = match down.as_mut() {
+                        Some(down) if !self.answer.committed => tokio::select! {
+                            message = self.read_server_message() => message?,
+                            Ok(()) = down.changed() => {
+                                return Err(Error::Backend(crate::backend::Error::ReplicaDown));
+                            }
+                        },
+                        _ => self.read_server_message().await?,
+                    };
                     self.process_server_message(context, message).await?;
                 }
             }

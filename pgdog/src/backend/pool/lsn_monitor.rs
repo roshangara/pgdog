@@ -185,6 +185,10 @@ impl LsnMonitor {
 
         let mut aurora_detected: Option<bool> = None;
         let mut interval = safe_interval(self.pool.config().lsn_check_interval);
+        // With replica_down_detection the check has a connection of its own:
+        // it never queues behind clients, so a check that doesn't answer in
+        // lsn_check_timeout means the server doesn't.
+        let mut own: Option<Box<Server>> = None;
 
         loop {
             select! {
@@ -192,7 +196,13 @@ impl LsnMonitor {
                 _ = self.pool.comms().shutdown.cancelled() => { break; }
             }
 
-            match self.run_check(aurora_detected).await {
+            let result = if self.pool.config().replica_down_detection {
+                self.run_own_check(aurora_detected, &mut own).await
+            } else {
+                self.run_check(aurora_detected).await
+            };
+
+            match result {
                 Ok(result) => aurora_detected = result,
                 Err(Error::Offline) => break,
                 Err(_) => continue,
@@ -200,6 +210,81 @@ impl LsnMonitor {
         }
 
         debug!("lsn monitor shutdown [{}]", self.pool.addr());
+    }
+
+    /// The check on the monitor's own connection. A connection that can't be
+    /// made, or a query not answered in lsn_check_timeout, marks the server
+    /// down (`Pool::replica_down`, replicas only).
+    async fn run_own_check(
+        &self,
+        mut aurora_detected: Option<bool>,
+        own: &mut Option<Box<Server>>,
+    ) -> Result<Option<bool>, Error> {
+        if !self.pool.lock().online {
+            return Err(Error::Offline);
+        }
+
+        let mut conn = match own.take() {
+            Some(conn) if !conn.error() => conn,
+            _ => match safe_timeout(
+                self.pool.config().connect_timeout,
+                self.pool.standalone(ConnectReason::LsnCheck),
+            )
+            .await
+            {
+                Ok(Ok(conn)) => Box::new(conn),
+                Ok(Err(err)) => {
+                    self.pool
+                        .replica_down(format!("its LSN check could not connect: {err}"));
+                    return Err(err);
+                }
+                Err(_) => {
+                    self.pool
+                        .replica_down("its LSN check could not connect in connect_timeout");
+                    return Err(Error::ConnectTimeout);
+                }
+            },
+        };
+
+        if aurora_detected.is_none() {
+            aurora_detected = self.detect_aurora(&mut conn).await;
+        }
+
+        let Some(aurora) = aurora_detected else {
+            self.pool
+                .replica_down("its LSN check did not answer in lsn_check_timeout");
+            return Ok(None);
+        };
+
+        let query = if aurora { AURORA_LSN_QUERY } else { LSN_QUERY };
+
+        match self.run_query(&mut conn, query).await {
+            Some(row) => {
+                self.store(LsnStats::from_row(row, aurora));
+                if !self.pool.healthy() {
+                    self.pool.inner().health.toggle(true);
+                }
+                *own = Some(conn);
+                Ok(aurora_detected)
+            }
+            None => {
+                self.pool
+                    .replica_down("its LSN check did not answer in lsn_check_timeout");
+                Err(Error::CheckoutTimeout)
+            }
+        }
+    }
+
+    /// Keep the stats of a check.
+    fn store(&self, stats: LsnStats) {
+        let mut guard = self.pool.inner().lsn_stats.write();
+        // Notify that the role changed and the shard monitor
+        // should immediately resynchronize.
+        if stats.replica != guard.replica {
+            self.pool.inner().lsn_role_change.notify_one();
+        }
+        (*guard) = stats;
+        trace!("lsn monitor stats updated [{}]", self.pool.addr());
     }
 
     async fn run_check(&self, mut aurora_detected: Option<bool>) -> Result<Option<bool>, Error> {

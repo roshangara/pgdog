@@ -528,6 +528,16 @@ pub struct General {
     #[serde(default = "General::replica_checkout_timeout")]
     pub replica_checkout_timeout: u64,
 
+    /// Take a replica out of reads as soon as it fails: its LSN check
+    /// (`lsn_check_timeout`) or a new connection to it. Reads waiting for one
+    /// of its connections move to another server at once, and a read in
+    /// flight on it that can run again elsewhere does (outside a transaction,
+    /// nothing but the answer's header sent to the client yet).
+    ///
+    /// _Default:_ `false`
+    #[serde(default = "General::replica_down_detection")]
+    pub replica_down_detection: bool,
+
     /// Maximum amount of time new clients have to complete authentication.
     ///
     /// _Default:_ `60000`
@@ -958,6 +968,7 @@ impl Default for General {
             read_write_split: Self::read_write_split(),
             read_after_write_ms: Self::read_after_write_ms(),
             replica_checkout_timeout: Self::replica_checkout_timeout(),
+            replica_down_detection: Self::replica_down_detection(),
             primary_functions: Vec::new(),
             route_unknown_functions_to_primary: Self::route_unknown_functions_to_primary(),
             tls_certificate: Self::tls_certificate(),
@@ -1378,6 +1389,10 @@ impl General {
 
     fn replica_checkout_timeout() -> u64 {
         Self::env_or_default("PGDOG_REPLICA_CHECKOUT_TIMEOUT", 0)
+    }
+
+    fn replica_down_detection() -> bool {
+        Self::env_bool_or_default("PGDOG_REPLICA_DOWN_DETECTION", false)
     }
 
     fn read_after_write_ms() -> u64 {

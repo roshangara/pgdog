@@ -6,6 +6,9 @@ use super::databases::User;
 
 #[derive(Debug, Error)]
 pub(crate) enum Error {
+    #[error("the replica was found down")]
+    ReplicaDown,
+
     #[error("{0}")]
     Io(#[from] std::io::Error),
 
@@ -151,6 +154,8 @@ impl Error {
             Self::ExecutionError(resp)
             | Self::ConnectionError(resp)
             | Self::PreparedStatementError(resp) => resp.is_retryable(),
+            // The replica was found down while a read waited on it.
+            Self::ReplicaDown => true,
             // Connection dropped between operations.
             Self::NotConnected
             | Self::MultiShardNotConnected

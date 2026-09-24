@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RawMutex, lock_api::MutexGuard};
 use pgdog_config::Role;
 use tokio::sync::Notify;
 use tokio::time::Instant;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::backend::pool::LsnStats;
 use crate::backend::{ConnectReason, DisconnectReason, Server, ServerOptions};
@@ -299,6 +299,7 @@ impl Pool {
             // the idle ones to the same server are likely dead too: don't hand
             // them to the next clients, open fresh ones instead.
             self.lock().dump_idle();
+            self.replica_down("a connection failed");
         }
 
         // Notify maintenance that we need a new connection because
@@ -358,6 +359,42 @@ impl Pool {
     /// The two pools refer to the same database.
     pub(crate) fn has_compatible_address_with(&self, other: &Pool) -> bool {
         self.addr().compatible(other.addr())
+    }
+
+    /// The replica stopped answering (its LSN check, a new connection, or a
+    /// connection that failed on the network): with `replica_down_detection`,
+    /// take it out of reads now instead of when each read's own timeout
+    /// fires. It's marked unhealthy (the load balancer skips it), its idle
+    /// connections are closed, the reads waiting for one of its connections
+    /// go to another server, and reads in flight on it that can run again
+    /// elsewhere do. Primaries are left alone: their writes follow the
+    /// election.
+    pub(crate) fn replica_down(&self, reason: impl std::fmt::Display) {
+        if !self.inner.config.replica_down_detection || self.lock().role != Role::Replica {
+            return;
+        }
+
+        let was_healthy = self.inner.health.healthy();
+        self.inner.health.toggle(false);
+        {
+            let mut guard = self.lock();
+            guard.dump_idle();
+            guard.close_waiters(Error::ServerError);
+        }
+        self.inner.comms.down.send_modify(|down| *down += 1);
+
+        if was_healthy {
+            warn!(
+                "replica down: {}; its reads go elsewhere [{}]",
+                reason,
+                self.addr()
+            );
+        }
+    }
+
+    /// Changes each time the replica is found down.
+    pub(crate) fn down_watch(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.comms.down.subscribe()
     }
 
     /// Pause pool, closing all open connections.

@@ -1261,3 +1261,60 @@ async fn test_move_conns_to_does_not_pause_destination_when_source_is_not_paused
 
     destination.shutdown();
 }
+
+/// A replica found down (ganjban lab H-3): the reads waiting for one of its
+/// connections go elsewhere at once, it's marked unhealthy, and reads in
+/// flight on it are told. A primary is never marked down this way.
+#[tokio::test]
+async fn test_replica_down_releases_waiters() {
+    let config = Config {
+        max: 1,
+        min: 1,
+        replica_down_detection: true,
+        checkout_timeout: Duration::from_secs(10),
+        ..Config::default()
+    };
+    let pool = Pool::new(&PoolConfig {
+        address: Address {
+            host: "127.0.0.1".into(),
+            port: 5432,
+            database_name: "pgdog".into(),
+            user: "pgdog".into(),
+            passwords: vec!["pgdog".into()],
+            ..Default::default()
+        },
+        config,
+    });
+    pool.set_role(pgdog_config::Role::Replica);
+    pool.launch();
+
+    let held = pool.get(&Request::default()).await.unwrap();
+    let waiter = {
+        let pool = pool.clone();
+        spawn(async move { pool.get(&Request::default()).await })
+    };
+    sleep(Duration::from_millis(100)).await;
+    assert!(!waiter.is_finished());
+
+    let mut down = pool.down_watch();
+    pool.replica_down("test");
+
+    let result = timeout(Duration::from_millis(200), waiter)
+        .await
+        .expect("the waiter moves on at once")
+        .unwrap();
+    assert!(result.is_err());
+    assert!(!pool.healthy());
+    assert!(down.has_changed().unwrap());
+    down.borrow_and_update();
+
+    // A primary is left alone.
+    pool.set_role(pgdog_config::Role::Primary);
+    pool.inner().health.toggle(true);
+    pool.replica_down("test");
+    assert!(pool.healthy());
+    assert!(!down.has_changed().unwrap());
+
+    drop(held);
+    pool.shutdown();
+}

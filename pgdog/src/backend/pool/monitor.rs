@@ -165,6 +165,7 @@ impl Monitor {
                         };
                         if !ok {
                             self.pool.inner().health.toggle(false);
+                            self.pool.replica_down("a new connection failed");
                         }
                     }
                 }

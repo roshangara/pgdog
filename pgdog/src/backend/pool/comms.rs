@@ -1,4 +1,4 @@
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 /// Internal pool notifications.
@@ -10,6 +10,9 @@ pub(super) struct Comms {
     pub(super) request: Notify,
     /// Pool is shutting down.
     pub(super) shutdown: CancellationToken,
+    /// Bumped each time the replica is found down: reads in flight on it
+    /// that can run again elsewhere stop waiting for it.
+    pub(super) down: watch::Sender<u64>,
 }
 
 impl Comms {
@@ -19,6 +22,7 @@ impl Comms {
             ready: Notify::new(),
             request: Notify::new(),
             shutdown: CancellationToken::new(),
+            down: watch::Sender::new(0),
         }
     }
 }
