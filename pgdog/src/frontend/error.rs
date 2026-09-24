@@ -60,6 +60,11 @@ pub(crate) enum Error {
     #[error("terminating connection due to administrator command")]
     AdminTermination,
 
+    #[error(
+        "a read ran again on another server after its replica failed, and answered differently"
+    )]
+    ReadRetryMismatch,
+
     // FIXME: layer errors better so we don't have
     // to reach so deep into a module.
     #[error("{0}")]

@@ -31,6 +31,7 @@ pub(crate) mod prelude;
 mod prepared_syntax_error;
 mod pub_sub;
 mod read_after_write;
+mod read_retry;
 mod reload;
 mod replicas;
 mod rewrite_extended;

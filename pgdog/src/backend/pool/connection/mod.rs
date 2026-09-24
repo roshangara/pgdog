@@ -477,6 +477,37 @@ impl Connection {
         self.binding.dirty();
     }
 
+    /// The client is served by a replica.
+    pub(crate) fn on_replica(&self) -> bool {
+        self.replica_target().is_some()
+    }
+
+    /// The replica serving this client failed a read: no more reads go
+    /// there for `ban_timeout` (unless no other server is left), and its
+    /// idle connections are closed. Returns its address.
+    pub(crate) fn ban_failed_replica(&self) -> Option<Address> {
+        let (ban, pool) = self.replica_target()?;
+        pool.inner().health.toggle(false);
+        ban.ban(super::Error::ServerError, pool.config().ban_timeout);
+        Some(pool.addr().clone())
+    }
+
+    /// The load balancer target of the replica this client is on.
+    fn replica_target(&self) -> Option<(super::lb::ban::Ban, super::Pool)> {
+        let Binding::Direct(guard, shard) = &self.binding else {
+            return None;
+        };
+        let shard = self.cluster.as_ref()?.shards().get(*shard)?;
+
+        shard
+            .pools_with_roles_and_bans()
+            .into_iter()
+            .find(|(role, _, pool)| {
+                *role == crate::config::Role::Replica && pool.id() == guard.pool.id()
+            })
+            .map(|(_, ban, pool)| (ban, pool))
+    }
+
     /// Check if any held server connection is currently locked to a client.
     #[cfg(test)]
     pub(crate) fn locked(&self) -> bool {

@@ -13,7 +13,11 @@ use crate::{
     util::safe_timeout,
 };
 
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
+
+/// How many times a read runs again on another server after its replica
+/// failed before answering.
+const MAX_READ_RETRIES: usize = 2;
 
 use super::hooks::schema::schema_changed;
 use super::*;
@@ -40,67 +44,126 @@ impl QueryEngine {
         // for single-statement writes.
         self.two_pc_check(context);
 
-        // We need to run a query now.
-        if context.in_transaction() {
-            // Connect to one shard if not sharded or to all shards
-            // for a cross-shard tranasction.
-            if !self.connect_transaction(context).await? {
+        // A read on a replica whose connection breaks before any of its
+        // answer reached the client runs again elsewhere: nothing it did
+        // can have committed, and the client sees only a slower answer.
+        let mut read_retries = 0;
+        let mut query_planner = query_planner;
+
+        loop {
+            // We need to run a query now.
+            if context.in_transaction() {
+                // Connect to one shard if not sharded or to all shards
+                // for a cross-shard tranasction.
+                if !self.connect_transaction(context).await? {
+                    return Ok(());
+                }
+            } else if !self.connect(context, None).await? {
                 return Ok(());
             }
-        } else if !self.connect(context, None).await? {
-            return Ok(());
-        }
 
-        // Check we can run this query.
-        if !self.cross_shard_check(context).await? {
-            return Ok(());
-        }
-
-        self.hooks.after_connected(context, &self.backend)?;
-
-        // Set response format.
-        for msg in context.client_request.messages.iter() {
-            if let ProtocolMessage::Bind(bind) = msg {
-                self.backend.bind(bind)?
+            // Check we can run this query.
+            if !self.cross_shard_check(context).await? {
+                return Ok(());
             }
-        }
 
-        let cancellation_token = self.backend.cancellation_token();
+            self.hooks.after_connected(context, &self.backend)?;
 
-        let query_timeout = context.timeouts.query_timeout(&State::Active);
-
-        let result = tokio::select! {
-            result = safe_timeout(
-                query_timeout,
-                self.client_server_exchange(context, query_planner),
-            ) => {
-                result
-            }
-            // If the cluster's cancellation token triggers, exit early. Currently used for admin FORCE_RELOAD.
-            // If this returns an Error, it'll be propagated up to Client's Box::pin(self.run())
-            // which will disconnect the client (and QueryEngine transactions)
-            _ = cancellation_token.cancelled() => {
-                // Postgres is still running the query. Send a cancellation request before we stop on our end.
-                if let Err(err) = self.backend.cancel_query().await {
-                    // Tell the administrator that we failed to cancel the query.
-                    error!("failed to cancel query on admin termination: {err}");
+            // Set response format.
+            for msg in context.client_request.messages.iter() {
+                if let ProtocolMessage::Bind(bind) = msg {
+                    self.backend.bind(bind)?
                 }
-                self.backend.force_close();
-                return Err(Error::AdminTermination);
             }
-        };
 
-        match result {
-            Ok(response) => response?,
-            Err(err) => {
-                // Close the conn, it could be stuck executing a query
-                // or dead.
-                self.backend.force_close();
-                return Err(err.into());
+            let cancellation_token = self.backend.cancellation_token();
+
+            let query_timeout = context.timeouts.query_timeout(&State::Active);
+
+            let retry_read = read_retries < MAX_READ_RETRIES
+                && self.read_can_run_again(context, query_planner.as_ref());
+            let planner = if retry_read {
+                query_planner.clone()
+            } else {
+                query_planner.take()
+            };
+            // What the client already has of the answer, from the attempt
+            // that failed: the new server's copy of it isn't sent again.
+            self.answer.replay = std::mem::take(&mut self.answer.sent).into();
+
+            let result = tokio::select! {
+                result = safe_timeout(
+                    query_timeout,
+                    self.client_server_exchange(context, planner),
+                ) => {
+                    result
+                }
+                // If the cluster's cancellation token triggers, exit early. Currently used for admin FORCE_RELOAD.
+                // If this returns an Error, it'll be propagated up to Client's Box::pin(self.run())
+                // which will disconnect the client (and QueryEngine transactions)
+                _ = cancellation_token.cancelled() => {
+                    // Postgres is still running the query. Send a cancellation request before we stop on our end.
+                    if let Err(err) = self.backend.cancel_query().await {
+                        // Tell the administrator that we failed to cancel the query.
+                        error!("failed to cancel query on admin termination: {err}");
+                    }
+                    self.backend.force_close();
+                    return Err(Error::AdminTermination);
+                }
+            };
+
+            match result {
+                Ok(Ok(())) => break,
+
+                Ok(Err(Error::Backend(err)))
+                    if retry_read && !self.answer.committed && err.is_retryable() =>
+                {
+                    read_retries += 1;
+                    let replica = self.backend.ban_failed_replica();
+                    warn!(
+                        "read failed on replica {}, before its answer: {}; running it again on another server [{:?}]",
+                        replica.map(|addr| addr.to_string()).unwrap_or_default(),
+                        err,
+                        context.stream.peer_addr()
+                    );
+                    self.backend.force_close();
+                }
+
+                Ok(Err(err)) => return Err(err),
+
+                Err(err) => {
+                    // Close the conn, it could be stuck executing a query
+                    // or dead.
+                    self.backend.force_close();
+                    return Err(err.into());
+                }
             }
         }
 
         Ok(())
+    }
+
+    /// This request may run again on another server if its replica fails
+    /// before any of the answer reached the client: a read routed to a
+    /// replica, outside a transaction, a whole request (it ends with Sync or
+    /// is a simple query), no COPY, no multi-step rewrite.
+    fn read_can_run_again(
+        &self,
+        context: &QueryEngineContext<'_>,
+        query_planner: Option<&RewriteResult>,
+    ) -> bool {
+        let whole = matches!(
+            context.client_request.messages.last(),
+            Some(ProtocolMessage::Sync(_) | ProtocolMessage::Query(_))
+        );
+
+        whole
+            && !context.in_transaction()
+            && self.begin_stmt.is_none()
+            && !context.client_request.is_copy()
+            && context.client_request.route().is_read()
+            && matches!(query_planner, None | Some(RewriteResult::InPlace { .. }))
+            && self.backend.on_replica()
     }
 
     async fn client_server_exchange(
@@ -149,6 +212,18 @@ impl QueryEngine {
         self.streaming = message.streaming();
 
         let code = message.code();
+
+        // Running again after a failed replica: the client already has the
+        // answer's first messages. Skip the new server's copy of them; an
+        // answer that differs can't be pieced together.
+        if let Some(sent) = self.answer.replay.pop_front() {
+            if sent == message.to_bytes() {
+                self.answer.sent.push(sent);
+                return Ok(());
+            }
+            self.answer.replay.clear();
+            return Err(Error::ReadRetryMismatch);
+        }
         let payload = if code == 'T' {
             Some(message.payload())
         } else {
@@ -298,6 +373,15 @@ impl QueryEngine {
             && !context.in_error(); // On error, pipeline is done executing.
         if !drop_message {
             trace!("{:#?} >>> {:?}", message, context.stream.peer_addr());
+
+            // Until a row, a status or an error reaches the client, the
+            // request can still run again elsewhere (header messages are
+            // the same from any server of the cluster).
+            if !self.answer.committed && matches!(code, 'T' | '1' | '2' | 't' | 'n') {
+                self.answer.sent.push(message.to_bytes());
+            } else {
+                self.answer.committed = true;
+            }
 
             if flush {
                 context.stream.send_flush(&message).await?;

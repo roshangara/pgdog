@@ -86,6 +86,21 @@ pub(crate) struct QueryEngine {
     read_after_write: ReadAfterWrite,
     // The server returned an error for the current request.
     request_error: bool,
+    // What the client has of the answer to the current request.
+    answer: Answer,
+}
+
+/// What the client has of the answer to the current request, for a read
+/// that runs again on another server.
+#[derive(Debug, Default)]
+struct Answer {
+    /// Header messages sent (RowDescription, ParseComplete, BindComplete,
+    /// ParameterDescription, NoData): any server sends the same.
+    sent: Vec<bytes::Bytes>,
+    /// Header messages of the failed attempt, left to skip in this one.
+    replay: std::collections::VecDeque<bytes::Bytes>,
+    /// Anything else was sent: the request can't run again.
+    committed: bool,
 }
 
 impl QueryEngine {
@@ -117,6 +132,7 @@ impl QueryEngine {
             hold_cursors: HoldCursors::default(),
             read_after_write: ReadAfterWrite::default(),
             request_error: false,
+            answer: Answer::default(),
         })
     }
 
@@ -157,6 +173,7 @@ impl QueryEngine {
             .received(context.client_request.total_message_len());
         self.set_state(State::Active); // Client is active.
         self.request_error = false;
+        self.answer = Answer::default();
 
         if self.in_extended_pipeline_error(context) {
             return Ok(QueryEngineResult::Done(context.transaction()));
