@@ -11,6 +11,9 @@ use crate::frontend::client::query_engine::TempTableChange;
 
 use super::SetParam;
 
+/// `CURSOR_OPT_HOLD` from PostgreSQL's `parsenodes.h`.
+pub(crate) const CURSOR_OPT_HOLD: i32 = 0x0020;
+
 /// One change, in statement order.
 #[derive(Debug, Clone)]
 pub(crate) enum SessionChange {
@@ -24,6 +27,11 @@ pub(crate) enum SessionChange {
     TempTable(TempTableChange),
     /// `DISCARD TEMP`.
     DiscardTemp,
+    /// `DECLARE <name> CURSOR WITH HOLD`: the cursor outlives its
+    /// transaction, on this server connection only.
+    HoldCursor(String),
+    /// `CLOSE <name>`, or `CLOSE ALL` (`None`).
+    CloseCursor(Option<String>),
     /// `UNLISTEN <channel>`, or `UNLISTEN *` (`None`).
     Unlisten(Option<String>),
 }

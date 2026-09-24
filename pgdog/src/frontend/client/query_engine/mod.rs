@@ -20,6 +20,7 @@ pub(crate) mod deallocate;
 pub(crate) mod discard;
 pub(crate) mod end_transaction;
 pub(crate) mod fake;
+mod hold_cursor;
 pub(crate) mod hooks;
 pub(crate) mod incomplete_requests;
 pub(crate) mod internal_values;
@@ -49,6 +50,7 @@ use self::query::ExplainResponseState;
 use self::query_log_stdout::log_query_stdout;
 pub(crate) use advisory_lock::AdvisoryLocks;
 pub(crate) use context::QueryEngineContext;
+use hold_cursor::HoldCursors;
 use notify_buffer::NotifyBuffer;
 use read_after_write::ReadAfterWrite;
 pub(crate) use result::QueryEngineResult;
@@ -78,6 +80,8 @@ pub(crate) struct QueryEngine {
     // or disconnect.
     manual_lock: bool,
     temp_tables: TempTables,
+    // Cursors WITH HOLD the client has open.
+    hold_cursors: HoldCursors,
     // Keeps the client's reads on the primary after it wrote.
     read_after_write: ReadAfterWrite,
     // The server returned an error for the current request.
@@ -110,6 +114,7 @@ impl QueryEngine {
             advisory_locks: AdvisoryLocks::default(),
             manual_lock: false,
             temp_tables: Default::default(),
+            hold_cursors: HoldCursors::default(),
             read_after_write: ReadAfterWrite::default(),
             request_error: false,
         })

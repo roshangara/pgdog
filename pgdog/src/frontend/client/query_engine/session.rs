@@ -46,6 +46,10 @@ impl QueryEngine {
                         self.temp_tables.update(change, in_transaction)
                     }
                     SessionChange::DiscardTemp => self.temp_tables.discard(in_transaction),
+                    SessionChange::HoldCursor(name) => {
+                        self.hold_cursors.declare(name, in_transaction)
+                    }
+                    SessionChange::CloseCursor(name) => self.hold_cursors.close(name.as_deref()),
                     SessionChange::Unlisten(Some(channel)) => self.backend.unlisten(channel),
                     SessionChange::Unlisten(None) => self.backend.unlisten_all(),
                 }

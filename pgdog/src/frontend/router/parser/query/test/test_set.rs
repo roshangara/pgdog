@@ -202,6 +202,56 @@ fn test_set_multi_statement_with_timezone_interval() {
     }
 }
 
+/// SET SESSION CHARACTERISTICS sets the session's defaults for every later
+/// transaction: parameters the client carries to any server connection
+/// (ganjban lab P-5), not a statement left on one connection.
+#[test]
+fn test_set_session_characteristics_is_parameters() {
+    let mut test = QueryParserTest::new();
+
+    for (query, expected) in [
+        (
+            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            vec![("default_transaction_isolation", "serializable")],
+        ),
+        (
+            "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
+            vec![("default_transaction_read_only", "on")],
+        ),
+        (
+            "SET SESSION CHARACTERISTICS AS TRANSACTION DEFERRABLE",
+            vec![("default_transaction_deferrable", "on")],
+        ),
+        (
+            "set session characteristics as transaction isolation level repeatable read, read write, not deferrable",
+            vec![
+                ("default_transaction_isolation", "repeatable read"),
+                ("default_transaction_read_only", "off"),
+                ("default_transaction_deferrable", "off"),
+            ],
+        ),
+    ] {
+        let command = test.execute(vec![Query::new(query).into()]);
+        let Command::Set { params, .. } = &command else {
+            panic!("expected Command::Set for '{query}', got {command:#?}");
+        };
+        let params = params
+            .iter()
+            .map(|param| {
+                (
+                    param.name.as_str(),
+                    param
+                        .value
+                        .as_ref()
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(params, expected, "{query}");
+    }
+}
+
 #[test]
 fn test_set_transaction_level() {
     let mut test = QueryParserTest::new();
@@ -211,9 +261,6 @@ fn test_set_transaction_level() {
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
         "set transaction isolation level repeatable read",
         "set transaction snapshot '00000003-0000001B-1'",
-        "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-        "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY",
-        "SET SESSION CHARACTERISTICS AS TRANSACTION DEFERRABLE",
     ] {
         let command = test.execute(vec![Query::new(query).into()]);
         match &command {

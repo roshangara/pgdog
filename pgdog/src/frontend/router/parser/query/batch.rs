@@ -142,7 +142,9 @@ impl Batch {
                 }
             }
 
-            Node::ClosePortalStmt(_) => (),
+            Node::ClosePortalStmt(stmt) => self.pending.push(SessionChange::CloseCursor(
+                stmt.portalname().map(ToOwned::to_owned),
+            )),
 
             Node::UnlistenStmt(stmt) => {
                 self.pending.push(SessionChange::Unlisten(
@@ -169,8 +171,12 @@ impl Batch {
             QueryParser::shard_ddl(node, sharding_schema, &mut calculator)?
         {
             self.schema_changed |= route.is_schema_changed();
-            if let Some(change) = route.temp_table_change {
+            if let Some(change) = route.temp_table_change.clone() {
                 self.pending.push(SessionChange::TempTable(change));
+            }
+            if let Some(changes) = route.session_changes() {
+                self.changes.dirty |= changes.dirty;
+                self.pending.extend(changes.changes.iter().cloned());
             }
         }
 
@@ -218,10 +224,17 @@ impl Batch {
                 .pending
                 .push(SessionChange::ResetAll { transaction: false }),
 
-            // SET TRANSACTION ... lasts one transaction. SET x FROM CURRENT
-            // has no value we can know: the connection is cleaned up
-            // when it's released (dirty).
-            VAR_SET_MULTI | VAR_SET_CURRENT => (),
+            VAR_SET_MULTI => {
+                // SET SESSION CHARACTERISTICS sets parameters; SET
+                // TRANSACTION lasts one transaction.
+                for param in QueryParser::session_characteristics(stmt).unwrap_or_default() {
+                    self.param(param);
+                }
+            }
+
+            // SET x FROM CURRENT has no value we can know: the connection
+            // is cleaned up when it's released (dirty).
+            VAR_SET_CURRENT => (),
 
             _ => {
                 let param = QueryParser::parse_set_param(stmt)?;

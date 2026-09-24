@@ -45,11 +45,15 @@ impl QueryEngine {
             }
             DiscardTarget::All => {
                 if self.backend.connected() {
+                    // The session state that pins the client, gone from its
+                    // server connection as DISCARD ALL would take it.
                     self.backend
-                        .execute("SELECT pg_advisory_unlock_all()")
+                        .execute("SELECT pg_advisory_unlock_all(); CLOSE ALL; DISCARD TEMP")
                         .await?;
                 }
                 self.advisory_locks.clear();
+                self.hold_cursors.clear();
+                self.temp_tables.clear();
                 context.prepared_statements.close_all();
                 self.backend.unlisten_all();
                 self.reset_session_params(context);

@@ -17,6 +17,17 @@ impl QueryParser {
         if stmt.kind == VAR_RESET_ALL {
             Ok(Command::ResetAll)
         } else if stmt.kind == VAR_SET_MULTI {
+            // SET SESSION CHARACTERISTICS AS TRANSACTION ... sets the
+            // session's defaults for every later transaction: the client's
+            // parameters, replayed on whichever connection it gets.
+            if let Some(params) = Self::session_characteristics(stmt) {
+                return Ok(Command::Set {
+                    params,
+                    route: Route::write(context.shards_calculator.shard()),
+                    set_config: false,
+                });
+            }
+
             // SET TRANSACTION
             Ok(Command::Query(
                 Route::write(context.shards_calculator.shard().clone())
@@ -56,6 +67,51 @@ impl QueryParser {
                 local: false,
             }),
         }
+    }
+
+    /// `SET SESSION CHARACTERISTICS AS TRANSACTION ...` (what pgjdbc's
+    /// `setTransactionIsolation` sends) as the parameters it sets:
+    /// `default_transaction_isolation`, `default_transaction_read_only` and
+    /// `default_transaction_deferrable`. `None` for any other `SET` of
+    /// several values, or a form we don't read.
+    pub(super) fn session_characteristics(stmt: &nodes::VariableSetStmt) -> Option<Vec<SetParam>> {
+        if stmt.kind != VAR_SET_MULTI || stmt.name() != Some("SESSION CHARACTERISTICS") {
+            return None;
+        }
+
+        stmt.args()
+            .iter()
+            .map(|arg| {
+                let Node::DefElem(elem) = arg else {
+                    return None;
+                };
+                let Node::A_Const(value) = elem.arg() else {
+                    return None;
+                };
+                let value = value.val()?;
+                let on_off = |value: i32| if value != 0 { "on" } else { "off" };
+                let (name, value) = match elem.defname()? {
+                    "transaction_isolation" => (
+                        "default_transaction_isolation",
+                        value.string_value()?.to_owned(),
+                    ),
+                    "transaction_read_only" => (
+                        "default_transaction_read_only",
+                        on_off(value.numeric_value::<i32>()?).to_owned(),
+                    ),
+                    "transaction_deferrable" => (
+                        "default_transaction_deferrable",
+                        on_off(value.numeric_value::<i32>()?).to_owned(),
+                    ),
+                    _ => return None,
+                };
+                Some(SetParam {
+                    name: name.to_owned(),
+                    value: Some(ParameterValue::String(value)),
+                    local: false,
+                })
+            })
+            .collect()
     }
 
     /// Try to handle multi-statement queries containing SET commands.

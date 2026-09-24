@@ -1,4 +1,5 @@
 use crate::frontend::client::query_engine::TempTableChange;
+use crate::frontend::router::parser::{SessionChange, SessionChanges, session::CURSOR_OPT_HOLD};
 use pg_raw_parse::raw::OnCommitAction::ONCOMMIT_DROP;
 use std::ffi::c_char;
 
@@ -29,8 +30,29 @@ impl QueryParser {
         let mut shard = Shard::All;
         let mut schema_changed = false;
         let mut temp_table = None;
+        let mut session = None;
 
         match node {
+            // A cursor WITH HOLD outlives its transaction on this server
+            // connection only: it pins the client until it's closed.
+            Node::DeclareCursorStmt(stmt) if stmt.options & CURSOR_OPT_HOLD != 0 => {
+                if let Some(name) = stmt.portalname() {
+                    session = Some(SessionChanges {
+                        changes: vec![SessionChange::HoldCursor(name.to_owned())],
+                        dirty: true,
+                    });
+                }
+            }
+
+            Node::ClosePortalStmt(stmt) => {
+                session = Some(SessionChanges {
+                    changes: vec![SessionChange::CloseCursor(
+                        stmt.portalname().map(ToOwned::to_owned),
+                    )],
+                    dirty: false,
+                });
+            }
+
             Node::CreateStmt(stmt) => {
                 schema_changed = true;
                 shard = Self::shard_ddl_table(stmt.relation(), schema)?.unwrap_or(Shard::All);
@@ -235,7 +257,8 @@ impl QueryParser {
         Ok(Command::Query(
             Route::write(calculator.shard())
                 .with_schema_changed(schema_changed)
-                .with_temp_table_change(temp_table),
+                .with_temp_table_change(temp_table)
+                .with_session_changes(session),
         ))
     }
 

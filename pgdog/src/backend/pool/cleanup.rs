@@ -16,6 +16,7 @@ static DIRTY: Lazy<Vec<Query>> = Lazy::new(|| {
         Query::new("RESET ALL"),                       // Reset all parameters.
         Query::new("SELECT pg_advisory_unlock_all()"), // Remove all advisory locks.
         Query::new("DISCARD TEMP"),                    // Drop all temporary tables.
+        Query::new("CLOSE ALL"),                       // Close cursors WITH HOLD.
     ]
 });
 

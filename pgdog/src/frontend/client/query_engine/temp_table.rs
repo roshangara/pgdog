@@ -41,6 +41,12 @@ impl TempTables {
         }
     }
 
+    /// DISCARD ALL dropped them.
+    pub(super) fn clear(&mut self) {
+        self.tables.clear();
+        self.discarded = None;
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.tables.is_empty() && self.discarded.as_ref().is_none_or(FnvHashMap::is_empty)
     }

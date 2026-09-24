@@ -37,6 +37,7 @@ mod rewrite_insert_split;
 mod rewrite_offset;
 mod rewrite_simple_prepared;
 mod schema_changed;
+mod session_state;
 mod set;
 mod set_schema_sharding;
 mod sharded;
