@@ -6,7 +6,7 @@ use super::*;
 
 /// A server that accepts connections and never answers,
 /// like a replica whose host froze.
-async fn silent_server() -> u16 {
+pub(super) async fn silent_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 

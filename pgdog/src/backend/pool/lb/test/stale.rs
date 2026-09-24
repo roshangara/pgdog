@@ -110,3 +110,84 @@ async fn test_no_fresh_source_the_freshest_replica_serves_reads() {
 
     lb.shutdown();
 }
+
+/// Every replica is stale and the primary answers, so reads go to the
+/// primary; then the primary stops answering (it froze, or died while reads
+/// waited for it).
+async fn primary_serving_reads(stale_replica_healthy: bool) -> (LoadBalancer, u16) {
+    let silent = super::replica_fallover::silent_server().await;
+    let primary = {
+        let mut config = create_test_pool_config("127.0.0.1", silent);
+        config.address.configured_role = Role::Primary;
+        config.config.checkout_timeout = Duration::from_millis(3_000);
+        config.config.replica_checkout_timeout = Duration::from_millis(300);
+        config.config.connect_timeout = Duration::from_millis(3_000);
+        config.config.ban_timeout = Duration::from_secs(60);
+        Pool::new(&config)
+    };
+    let mut replica = create_test_pool_config("127.0.0.1", 5432);
+    replica.config.ban_timeout = Duration::from_secs(60);
+    let lb = LoadBalancer::new(
+        &Some(primary),
+        &[replica],
+        LoadBalancingStrategy::RoundRobin,
+        ReadWriteSplit::ExcludePrimary,
+        Default::default(),
+    );
+    lb.targets.iter().for_each(|target| target.pool.launch());
+
+    // The monitor took the replica out of reads for its lag while the
+    // primary answered (or for being down).
+    let replica = &lb.targets[0];
+    assert_eq!(replica.role(), Role::Replica);
+    if stale_replica_healthy {
+        replica.ban.ban(Error::ReplicaLag, Duration::from_secs(60));
+    } else {
+        replica.health().toggle(false);
+        replica
+            .ban
+            .ban(Error::PoolUnhealthy, Duration::from_secs(60));
+    }
+    (lb, silent)
+}
+
+fn read() -> Request {
+    Request::new(Default::default(), true, false)
+}
+
+/// A read on the primary gives up on it after replica_checkout_timeout, not
+/// checkout_timeout (35 s on a door): the stale replica is somewhere to go,
+/// and the next attempt (Connection::connect tries once more) gets it.
+#[tokio::test]
+async fn test_read_on_a_silent_primary_falls_back_to_the_stale_replica() {
+    let (lb, _) = primary_serving_reads(true).await;
+
+    let started = Instant::now();
+    let result = lb.get(&read()).await;
+    let waited = started.elapsed();
+    assert_eq!(result.err(), Some(Error::AllReplicasDown));
+    assert!(waited < Duration::from_millis(1_500), "waited {waited:?}");
+
+    // Nothing fresh answers: the stale replica is back in reads.
+    assert!(!lb.targets[0].ban.banned());
+    let conn = lb.get(&read()).await.expect("the stale replica serves it");
+    assert_eq!(conn.pool.addr().port, 5432);
+    drop(conn);
+
+    lb.shutdown();
+}
+
+/// A replica out of reads because it is down is nowhere to go: the read
+/// waits for the primary as before.
+#[tokio::test]
+async fn test_read_on_a_silent_primary_waits_when_the_replica_is_down() {
+    let (lb, _) = primary_serving_reads(false).await;
+
+    let started = Instant::now();
+    let result = lb.get(&read()).await;
+    let waited = started.elapsed();
+    assert!(result.is_err());
+    assert!(waited >= Duration::from_millis(3_000), "waited {waited:?}");
+
+    lb.shutdown();
+}

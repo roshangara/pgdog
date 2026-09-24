@@ -580,6 +580,14 @@ impl LoadBalancer {
         // and we have alternates.
         let bannable = candidates.len() > 1;
 
+        // A replica out of reads only for its lag still answers, and stale
+        // reads beat none: a read on the primary has somewhere to go.
+        let stale_replica = candidates.iter().any(|target| {
+            target.role() == Role::Replica
+                && target.ban.error() == Some(Error::ReplicaLag)
+                && target.health().healthy()
+        });
+
         for (i, target) in candidates.iter().enumerate() {
             if target.ban.banned() {
                 continue;
@@ -587,7 +595,10 @@ impl LoadBalancer {
 
             // Somewhere else to go: don't queue on a replica that is failing,
             // and don't wait on this one longer than replica_checkout_timeout.
-            let fallback = candidates[i + 1..].iter().any(|other| !other.ban.banned());
+            // A primary that stops answering while it serves reads for stale
+            // replicas holds them that long, not checkout_timeout.
+            let fallback = candidates[i + 1..].iter().any(|other| !other.ban.banned())
+                || (target.role() == Role::Primary && stale_replica);
 
             if fallback && bannable && !target.health().healthy() {
                 let healthy_fallback = candidates[i + 1..]
