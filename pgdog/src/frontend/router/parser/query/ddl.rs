@@ -92,11 +92,21 @@ impl QueryParser {
                 shard = Self::shard_ddl_table(stmt.view(), schema)?.unwrap_or(Shard::All);
             }
 
+            // CREATE [TEMP] TABLE ... AS, and SELECT ... INTO [TEMP] (the same
+            // statement, parsed as a SELECT): a write, and a temporary table
+            // pins the client like CREATE TEMP TABLE.
             Node::CreateTableAsStmt(stmt) => {
                 schema_changed = true;
                 if let Some(into) = stmt.into() {
                     shard = Self::shard_ddl_table(into.rel(), schema)?.unwrap_or(Shard::All);
+                    temp_table = Self::temp_table_into(into);
                 }
+            }
+
+            Node::SelectStmt(stmt) if let Some(into) = stmt.into_clause() => {
+                schema_changed = true;
+                shard = Self::shard_ddl_table(into.rel(), schema)?.unwrap_or(Shard::All);
+                temp_table = Self::temp_table_into(into);
             }
 
             Node::CreateFunctionStmt(stmt) => {
@@ -227,6 +237,18 @@ impl QueryParser {
                 .with_schema_changed(schema_changed)
                 .with_temp_table_change(temp_table),
         ))
+    }
+
+    /// The temporary table an `INTO` clause creates, if it's temporary.
+    fn temp_table_into(into: &nodes::IntoClause) -> Option<TempTableChange> {
+        let rv = into.rel()?;
+        (rv.relpersistence == b't' as c_char).then(|| TempTableChange::Create {
+            name: rv
+                .relname()
+                .expect("CREATE TABLE AS always has table name")
+                .to_owned(),
+            drop_on_commit: into.on_commit == ONCOMMIT_DROP,
+        })
     }
 
     pub(super) fn shard_ddl_table(
