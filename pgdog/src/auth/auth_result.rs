@@ -17,6 +17,8 @@ pub(crate) enum AuthResult {
     NoPassthroughNoUser,
     /// Passthrough auth doesn't allow password changes.
     NoPassthroughPasswordChange,
+    /// PostgreSQL did not accept the passthrough password.
+    NoPassthroughServerLogin,
     /// No user or database in config.
     NoUserOrDatabase,
     /// Client didn't provide password message.
@@ -51,6 +53,9 @@ impl Display for AuthResult {
             Self::NoPassthroughNoUser => write!(f, "no user in config (passthrough auth)"),
             Self::NoPassthroughPasswordChange => {
                 write!(f, "passthrough auth does not allow password change")
+            }
+            Self::NoPassthroughServerLogin => {
+                write!(f, "postgres did not accept the password (passthrough auth)")
             }
             Self::NoUserOrDatabase => write!(f, "no user or database in config"),
             Self::NoPasswordMessage => write!(f, "client did not send password message"),

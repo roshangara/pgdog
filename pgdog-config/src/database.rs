@@ -124,6 +124,8 @@ impl Display for ReadWriteSplit {
 pub struct Database {
     /// Name of your database. Clients that connect to PgDog will need to use this name to refer to the database. For multiple entries that are part of the same cluster, use the same value.
     ///
+    /// `"*"` serves every database that has no entries of its own: a client asking for database `x` gets these hosts with `database_name = "x"`. Pair it with passthrough authentication to serve databases and users created after PgDog started.
+    ///
     /// <https://docs.pgdog.dev/configuration/pgdog.toml/databases/#name>
     pub name: String,
     /// Type of role this host performs in your database cluster. This can be `primary` for primary databases that serve writes (and reads), `replica` for PostgreSQL replicas that can only serve reads, or `auto` to let PgDog decide.

@@ -14,8 +14,10 @@ use pgdog_config::{
     ShardedMappingKindDeprecated, ShardedMappingList, ShardedMappingRange, ShardedTableConfig,
 };
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::auth::AuthResult;
@@ -175,11 +177,112 @@ pub(crate) fn reload(force: bool) -> Result<(), Error> {
     Ok(())
 }
 
+/// `[[databases]]` name that serves any database not configured by name.
+const ANY_DATABASE: &str = "*";
+
+/// Shards of a database: its own `[[databases]]` entries or, if it has
+/// none, the `name = "*"` entries pointed at the database of that name.
+fn database_shards(
+    databases: &HashMap<String, Vec<Vec<EnumeratedDatabase>>>,
+    name: &str,
+) -> Option<Vec<Vec<EnumeratedDatabase>>> {
+    if let Some(shards) = databases.get(name) {
+        return Some(shards.clone());
+    }
+
+    let shards = databases.get(ANY_DATABASE)?;
+
+    Some(
+        shards
+            .iter()
+            .map(|shard| {
+                shard
+                    .iter()
+                    .map(|entry| {
+                        let mut entry = entry.clone();
+                        entry.database.name = name.to_owned();
+                        entry.database.database_name = Some(name.to_owned());
+                        entry
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// Check a passthrough password with PostgreSQL before PgDog stores it:
+/// log in to the database's servers, primaries first, until one accepts.
+async fn verify_passthrough(user: ConfigUser) -> bool {
+    use super::{ConnectReason, Server, ServerOptions};
+
+    let config = config();
+    let Some(shards) = database_shards(&config.config.databases(), &user.database) else {
+        return false;
+    };
+    let timeout = Duration::from_millis(config.config.general.connect_timeout);
+
+    let mut entries: Vec<&EnumeratedDatabase> = shards.iter().flatten().collect();
+    entries.sort_by_key(|entry| entry.role != pgdog_config::Role::Primary);
+
+    for entry in entries {
+        let address = Address::new(entry, &user, entry.number);
+        let login = Server::connect(
+            &address,
+            ServerOptions::default(),
+            ConnectReason::Probe,
+            Default::default(),
+        );
+
+        match tokio::time::timeout(timeout, login).await {
+            Ok(Ok(_server)) => return true,
+            Ok(Err(err)) => debug!("passthrough login refused [{}]: {}", address, err),
+            Err(_) => debug!("passthrough login timed out [{}]", address),
+        }
+    }
+
+    false
+}
+
 /// Add new user to pool via passthrough authentication.
 ///
-/// Return true if user can login, false otherwise.
-///
-pub(crate) fn add(user: ConfigUser) -> Result<AuthResult, Error> {
+/// A password PgDog doesn't have yet is stored only after PostgreSQL
+/// accepts it, so a wrong password can't lock out the right one.
+pub(crate) async fn add(user: ConfigUser) -> Result<AuthResult, Error> {
+    add_verified(user, verify_passthrough).await
+}
+
+async fn add_verified<F, Fut>(user: ConfigUser, verify: F) -> Result<AuthResult, Error>
+where
+    F: FnOnce(ConfigUser) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let config = config();
+    let existing = config.users.find(&user);
+
+    // Match the stored password first: no need to ask the server.
+    let matches = existing.as_ref().is_some_and(|existing| {
+        existing
+            .password
+            .as_deref()
+            .zip(user.password.as_deref())
+            .is_some_and(|(stored, provided)| {
+                crate::util::constant_time_eq(stored.as_bytes(), provided.as_bytes())
+            })
+    });
+    let may_store = existing.as_ref().is_none_or(|existing| {
+        existing.password.is_none() || config.config.general.passthrough_auth.allows_change()
+    });
+
+    if !matches && may_store && !verify(user.clone()).await {
+        return Ok(AuthResult::NoPassthroughServerLogin);
+    }
+
+    store(user)
+}
+
+/// Store a passthrough user without asking PostgreSQL, for a password
+/// PgDog already trusts, e.g. to restore its pool after RELOAD.
+pub(crate) fn store(user: ConfigUser) -> Result<AuthResult, Error> {
     fn add_user(user: ConfigUser) -> Result<(), Error> {
         debug!(
             r#"adding user "{}" to database "{}" via passthrough auth"#,
@@ -572,7 +675,7 @@ fn new_pool(
     let general = &config.general;
     let databases = config.databases();
 
-    let shards = databases.get(&user.database)?;
+    let shards = database_shards(&databases, &user.database)?;
 
     let shard_configs: Vec<ClusterShardConfig> = shards
         .iter()
@@ -810,6 +913,11 @@ mod tests {
         replace_databases(databases, false).expect("replace databases");
     }
 
+    /// Passthrough login that PostgreSQL accepts.
+    async fn accept(_: ConfigUser) -> bool {
+        true
+    }
+
     fn make_user(name: &str, password: Option<&str>) -> ConfigUser {
         ConfigUser {
             name: name.to_string(),
@@ -823,7 +931,7 @@ mod tests {
     async fn test_add_new_user() {
         setup_config(PassthroughAuth::EnabledPlain, vec![]);
 
-        let result = add(make_user("new_user", Some("secret")));
+        let result = add_verified(make_user("new_user", Some("secret")), accept).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
 
@@ -840,7 +948,7 @@ mod tests {
             vec![make_user("alice", Some("pass123"))],
         );
 
-        let result = add(make_user("alice", Some("pass123")));
+        let result = add_verified(make_user("alice", Some("pass123")), accept).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
     }
@@ -849,7 +957,7 @@ mod tests {
     async fn test_add_existing_user_no_password_set() {
         setup_config(PassthroughAuth::EnabledPlain, vec![make_user("bob", None)]);
 
-        let result = add(make_user("bob", Some("new_pass")));
+        let result = add_verified(make_user("bob", Some("new_pass")), accept).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
 
@@ -865,7 +973,7 @@ mod tests {
             vec![make_user("charlie", Some("old_pass"))],
         );
 
-        let result = add(make_user("charlie", Some("wrong_pass")));
+        let result = add_verified(make_user("charlie", Some("wrong_pass")), accept).await;
         assert!(result.is_ok());
         assert!(!result.unwrap().is_ok());
     }
@@ -877,13 +985,132 @@ mod tests {
             vec![make_user("dave", Some("old_pass"))],
         );
 
-        let result = add(make_user("dave", Some("new_pass")));
+        let result = add_verified(make_user("dave", Some("new_pass")), accept).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_ok());
 
         let config = crate::config::config();
         let found = config.users.find(&make_user("dave", None));
         assert_eq!(found.unwrap().password, Some("new_pass".to_string()));
+    }
+
+    /// Passthrough login that PostgreSQL refuses.
+    async fn refuse(_: ConfigUser) -> bool {
+        false
+    }
+
+    /// The stored password matched: PostgreSQL must not be asked.
+    async fn unreachable(_: ConfigUser) -> bool {
+        panic!("stored password matched, no server login expected")
+    }
+
+    #[tokio::test]
+    async fn test_add_new_user_wrong_password_is_not_stored() {
+        setup_config(PassthroughAuth::EnabledPlain, vec![]);
+
+        let result = add_verified(make_user("frank", Some("wrong")), refuse).await;
+        assert!(!result.unwrap().is_ok());
+        let config = crate::config::config();
+        assert!(config.users.find(&make_user("frank", None)).is_none());
+
+        // The right password still gets in.
+        let result = add_verified(make_user("frank", Some("right")), accept).await;
+        assert!(result.unwrap().is_ok());
+        let config = crate::config::config();
+        let found = config.users.find(&make_user("frank", None)).unwrap();
+        assert_eq!(found.password, Some("right".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_changed_password_refused_by_server_is_not_stored() {
+        setup_config(
+            PassthroughAuth::EnabledPlainAllowChange,
+            vec![make_user("gina", Some("old_pass"))],
+        );
+
+        let result = add_verified(make_user("gina", Some("wrong")), refuse).await;
+        assert!(!result.unwrap().is_ok());
+
+        let config = crate::config::config();
+        let found = config.users.find(&make_user("gina", None)).unwrap();
+        assert_eq!(found.password, Some("old_pass".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_matching_password_skips_server_login() {
+        setup_config(
+            PassthroughAuth::EnabledPlain,
+            vec![make_user("hank", Some("pass123"))],
+        );
+
+        let result = add_verified(make_user("hank", Some("pass123")), unreachable).await;
+        assert!(result.unwrap().is_ok());
+    }
+
+    /// `name = "*"` serves every database that isn't configured by name.
+    fn setup_any_database(users: Vec<ConfigUser>) {
+        let _lock = lock();
+        let database = |role| Database {
+            name: ANY_DATABASE.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 5432,
+            role,
+            ..Default::default()
+        };
+        let config = Config {
+            databases: vec![database(Role::Primary), database(Role::Replica)],
+            general: General {
+                passthrough_auth: PassthroughAuth::EnabledPlain,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let cu = ConfigAndUsers {
+            config,
+            users: crate::config::Users {
+                users,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        crate::config::set(cu).expect("set config");
+        let databases = from_config(&crate::config::config());
+        replace_databases(databases, false).expect("replace databases");
+    }
+
+    #[tokio::test]
+    async fn test_any_database_serves_unconfigured_databases() {
+        let user = ConfigUser {
+            name: "ivy".to_string(),
+            database: "customer_42".to_string(),
+            password: Some("secret".to_string()),
+            ..Default::default()
+        };
+        setup_any_database(vec![user]);
+
+        let cluster = databases().cluster(("ivy", "customer_42")).unwrap();
+        let pools = cluster.shards()[0].pools_with_roles();
+        assert_eq!(pools.len(), 2);
+        for (_, pool) in pools {
+            assert_eq!(pool.addr().database_name, "customer_42");
+        }
+    }
+
+    /// Needs the test database: user pgdog, password pgdog, database pgdog.
+    #[tokio::test]
+    async fn test_verify_passthrough_logs_in_to_postgres() {
+        setup_any_database(vec![]);
+
+        let user = |password: &str| ConfigUser {
+            name: "pgdog".to_string(),
+            database: "pgdog".to_string(),
+            password: Some(password.to_string()),
+            ..Default::default()
+        };
+
+        assert!(verify_passthrough(user("pgdog")).await);
+        assert!(!verify_passthrough(user("wrong")).await);
     }
 
     #[tokio::test]
@@ -895,7 +1122,7 @@ mod tests {
 
         setup_config(PassthroughAuth::EnabledPlainAllowChange, vec![erin]);
 
-        let result = add(make_user("erin", Some("new_pass")));
+        let result = add_verified(make_user("erin", Some("new_pass")), accept).await;
         assert!(result.unwrap().is_ok());
 
         let config = crate::config::config();

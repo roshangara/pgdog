@@ -492,7 +492,7 @@
           "minimum": 0
         },
         "name": {
-          "description": "Name of your database. Clients that connect to PgDog will need to use this name to refer to the database. For multiple entries that are part of the same cluster, use the same value.\n\n<https://docs.pgdog.dev/configuration/pgdog.toml/databases/#name>",
+          "description": "Name of your database. Clients that connect to PgDog will need to use this name to refer to the database. For multiple entries that are part of the same cluster, use the same value.\n\n`\"*\"` serves every database that has no entries of its own: a client asking for database `x` gets these hosts with `database_name = \"x\"`. Pair it with passthrough authentication to serve databases and users created after PgDog started.\n\n<https://docs.pgdog.dev/configuration/pgdog.toml/databases/#name>",
           "type": "string"
         },
         "password": {

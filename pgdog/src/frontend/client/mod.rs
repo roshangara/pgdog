@@ -297,7 +297,7 @@ impl Client {
             // won't be able to run queries.
             let user = user_from_params(&params, &password).ok();
             if let Some(user) = user {
-                databases::add(user)?
+                databases::add(user).await?
             } else {
                 AuthResult::NoPassthroughNoUser
             }

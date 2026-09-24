@@ -396,7 +396,7 @@ impl Connection {
                 }
             }
 
-            databases::add(user)?;
+            databases::store(user)?;
         }
 
         let databases = databases();
