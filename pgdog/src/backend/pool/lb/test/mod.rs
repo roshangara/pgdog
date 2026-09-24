@@ -12,6 +12,7 @@ use pgdog_stats::{LsnStats as StatsLsnStats, ReplicaLag};
 use super::*;
 use monitor::Monitor;
 
+mod election;
 mod role_detection;
 
 fn create_test_pool_config(host: &str, port: u16) -> PoolConfig {
@@ -1596,11 +1597,12 @@ async fn test_election_channel_no_race_condition() {
     set_lsn_stats(&lb.targets[0], false, 100);
     assert!(lb.redetect_roles());
 
-    let elected = timeout(Duration::ZERO, lb.wait_primary())
+    let conn = timeout(Duration::from_secs(1), lb.get_primary(&Request::default()))
         .await
-        .expect("wait_primary should resolve")
+        .expect("an election that already happened should not be waited for")
         .expect("primary should be elected");
-    assert_eq!(elected.addr().host, "127.0.0.1");
+    assert_eq!(conn.pool.addr().host, "127.0.0.1");
+    drop(conn);
 
     lb.shutdown();
 }

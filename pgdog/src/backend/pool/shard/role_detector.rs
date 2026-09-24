@@ -102,6 +102,24 @@ mod test {
     }
 
     #[test]
+    fn test_auto_shard_between_elections_is_not_read_only() {
+        let replicas = [
+            create_test_pool_config("127.0.0.1", 5432, true),
+            create_test_pool_config("localhost", 5432, true),
+        ];
+        let shard = create_test_shard(None, &replicas);
+        set_lsn_stats(&shard, 0, true, 100);
+        set_lsn_stats(&shard, 1, true, 100);
+
+        let mut detector = RoleDetector::new(&shard);
+        detector.changed();
+
+        // Nobody is primary right now (a failover): writes must wait for
+        // the next election, not be routed as reads.
+        assert!(shard.has_primary());
+    }
+
+    #[test]
     fn test_changed_returns_false_when_lsn_stats_invalid() {
         let primary = Some(create_test_pool_config("127.0.0.1", 5432, true));
         let replicas = [create_test_pool_config("localhost", 5432, true)];

@@ -86,10 +86,13 @@ fn test_replica_only_transactions_after_role_detection() {
         shard.redetect_roles();
         assert!(!cluster.read_only(), "one role is still unknown");
 
+        // No server is primary right now, e.g. during a failover: the cluster
+        // is between elections, not read-only. Transactions wait for the next
+        // primary instead of running on a replica.
         set_replica(&pools[1], true);
         shard.redetect_roles();
-        assert!(cluster.read_only(), "all configured servers are replicas");
-        assert_transaction_route(&cluster, true);
+        assert!(!cluster.read_only(), "between elections");
+        assert_transaction_route(&cluster, false);
 
         set_replica(&pools[1], false);
         shard.redetect_roles();
@@ -98,8 +101,8 @@ fn test_replica_only_transactions_after_role_detection() {
 
         set_replica(&pools[1], true);
         shard.redetect_roles();
-        assert!(cluster.read_only());
-        assert_transaction_route(&cluster, true);
+        assert!(!cluster.read_only());
+        assert_transaction_route(&cluster, false);
     }
 }
 

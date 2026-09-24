@@ -192,9 +192,10 @@ impl Shard {
 
     /// Returns true if the shard has a primary database.
     pub(crate) fn has_primary(&self) -> bool {
-        // Until detection completes, a configured auto target may be a primary.
-        let pending = self.lb.role_detection_enabled() && !self.lb.roles_detected();
-        pending || self.lb.primary().is_some()
+        // With automatic roles, a shard without an elected primary is between
+        // elections (e.g. during a failover), not read-only: writes and
+        // read/write transactions wait for the next primary.
+        self.lb.role_detection_enabled() || self.lb.primary().is_some()
     }
 
     /// Returns true if the shard has any replica databases.

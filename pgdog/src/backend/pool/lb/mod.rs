@@ -5,11 +5,13 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use rand::seq::SliceRandom;
+use tokio::select;
 use tokio::sync::watch;
+use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -20,7 +22,6 @@ use crate::{
 };
 
 use super::{Error, Guard, Oids, Pool, PoolConfig, PoolRole, Request};
-use crate::util::safe_timeout;
 
 pub(crate) mod ban;
 pub(crate) mod monitor;
@@ -142,6 +143,8 @@ impl LoadBalancer {
             .as_ref()
             .map(|pool| Target::new(pool.clone(), Role::Primary));
 
+        let elected = primary.clone();
+
         if let Some(primary) = primary_target {
             targets.push(primary);
         }
@@ -152,7 +155,7 @@ impl LoadBalancer {
             round_robin: Arc::new(AtomicUsize::new(0)),
             lb_strategy,
             maintenance: CancellationToken::new(),
-            elected_primary: Arc::new(watch::Sender::new(None)),
+            elected_primary: Arc::new(watch::Sender::new(elected)),
             rw_split,
         }
     }
@@ -173,59 +176,74 @@ impl LoadBalancer {
             .find(|target| target.role() == Role::Primary)
     }
 
-    /// Detect database roles from pg_is_in_recovery() and
-    /// return new primary (if any), and replicas.
+    /// Detect database roles from pg_is_in_recovery() and elect the primary.
+    ///
+    /// A primary is a server that reports it isn't in recovery. If several
+    /// do, e.g. an old primary that came back before it was turned into a
+    /// replica, the one on the latest timeline wins, then the one with the
+    /// most WAL. Stats of a server that stopped answering are kept, so a
+    /// crashed primary can't beat the replica promoted in its place. If no
+    /// server reports being a primary, a primary that is now in recovery is
+    /// dropped at once, and writes wait for the next election.
+    ///
+    /// Returns true if the elected primary changed.
     pub(crate) fn redetect_roles(&self) -> bool {
-        let mut promoted = false;
-
-        let mut targets = self
+        let before = self.primary().map(|pool| pool.addr().clone());
+        let targets = self
             .targets
-            .clone()
-            .into_iter()
+            .iter()
             .map(|target| (target.pool.lsn_stats(), target))
             .collect::<Vec<_>>();
 
-        // Pick primary by latest data. The one with the most
-        // up-to-date lsn number and pg_is_in_recovery() = false
-        // is the new primary.
-        //
-        // The old primary is still part of the config and will be demoted
-        // to replica. If it's down, it will be banned from serving traffic.
-        //
-        let now = SystemTime::now();
-        targets.sort_by_cached_key(|target| target.0.lsn_age(now));
-
         let primary = targets
             .iter()
-            .position(|target| !target.0.replica && target.0.valid());
-
-        self.elected_primary.send_replace(None);
+            .filter(|(stats, _)| !stats.replica && stats.valid())
+            .max_by_key(|(stats, target)| {
+                (
+                    stats.timeline,
+                    stats.lsn.lsn,
+                    target.role() == Role::Primary,
+                )
+            })
+            .map(|(_, target)| *target);
 
         if let Some(primary) = primary {
-            promoted = targets[primary].1.set_role(Role::Primary);
-
-            if promoted {
-                warn!("new primary chosen: {}", targets[primary].1.pool.addr());
+            if primary.set_role(Role::Primary) {
+                warn!("new primary chosen: {}", primary.pool.addr());
             }
 
             // Demote everyone else to replicas.
             targets
                 .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != primary)
+                .filter(|(_, target)| target.pool.addr() != primary.pool.addr())
                 .for_each(|(_, target)| {
-                    target.1.set_role(Role::Replica);
+                    target.set_role(Role::Replica);
                 });
-        } else if targets.iter().all(|target| target.0.valid()) {
-            // All targets are replicas until we get a primary.
-            targets.iter().for_each(|target| {
-                target.1.set_role(Role::Replica);
-            });
+        } else {
+            for (stats, target) in &targets {
+                if stats.valid() && target.set_role(Role::Replica) {
+                    warn!("primary is in recovery, dropped: {}", target.pool.addr());
+                }
+            }
         }
 
-        self.elected_primary.send_replace(self.primary().cloned());
+        let elected = self.primary().cloned();
+        let changed = before.as_ref() != elected.as_ref().map(|pool| pool.addr());
+        self.publish_primary(elected);
 
-        promoted
+        changed
+    }
+
+    /// Tell writes waiting in [`Self::get_primary`] about the elected primary.
+    fn publish_primary(&self, elected: Option<Pool>) {
+        self.elected_primary.send_if_modified(|current| {
+            let changed = current.as_ref().map(|pool| pool.addr())
+                != elected.as_ref().map(|pool| pool.addr());
+            if changed {
+                *current = elected;
+            }
+            changed
+        });
     }
 
     /// Launch replica pools and start the monitor.
@@ -285,6 +303,7 @@ impl LoadBalancer {
             }
         }
         destination.require_healthcheck_for_new_targets(&self.targets);
+        destination.publish_primary(destination.primary().cloned());
 
         Ok(moved)
     }
@@ -306,6 +325,7 @@ impl LoadBalancer {
     }
 
     /// True once every target has a configured or detected role.
+    #[cfg(test)]
     pub(crate) fn roles_detected(&self) -> bool {
         self.targets
             .iter()
@@ -332,34 +352,46 @@ impl LoadBalancer {
         result
     }
 
-    /// Wait until automatic role detection elects a primary.
-    ///
-    /// Fails with [`Error::CheckoutTimeout`] if no election happens in time.
-    async fn wait_primary(&self) -> Result<Pool, Error> {
-        let mut receiver = self.elected_primary.subscribe();
-
-        safe_timeout(self.checkout_timeout, receiver.wait_for(|p| p.is_some()))
-            .await
-            .map_err(|_| Error::CheckoutTimeout)?
-            .ok()
-            .and_then(|elected| elected.as_ref().cloned())
-            .ok_or(Error::NoPrimary)
-    }
-
     /// Check out a connection from the primary.
     ///
-    /// In automatic mode, the caller waits for an election. Static
-    /// replica-only configurations fail immediately with [`Error::NoPrimary`].
+    /// Static replica-only configurations fail immediately with
+    /// [`Error::NoPrimary`]. With automatic roles, the caller follows the
+    /// election for up to `checkout_timeout`: it waits while there is no
+    /// primary, and a wait on a primary that fails over moves to the new one.
     pub(super) async fn get_primary(&self, request: &Request) -> Result<Guard, Error> {
-        if let Some(pool) = self.primary() {
-            return pool.get(request).await;
-        }
-
         if !self.role_detection_enabled() {
-            return Err(Error::NoPrimary);
+            return match self.primary() {
+                Some(pool) => pool.get(request).await,
+                None => Err(Error::NoPrimary),
+            };
         }
 
-        self.wait_primary().await?.get(request).await
+        let deadline = Instant::now() + self.checkout_timeout;
+        let mut elections = self.elected_primary.subscribe();
+
+        loop {
+            let elected = elections.borrow_and_update().clone();
+            let address = elected.as_ref().map(|pool| pool.addr().clone());
+            let new_election = elections
+                .wait_for(|current| current.as_ref().map(|pool| pool.addr()) != address.as_ref());
+
+            let checkout = async {
+                match elected {
+                    Some(ref pool) => pool.get(request).await,
+                    None => std::future::pending().await,
+                }
+            };
+
+            select! {
+                result = checkout => return result,
+                changed = new_election => {
+                    if changed.is_err() {
+                        return Err(Error::NoPrimary);
+                    }
+                }
+                _ = sleep_until(deadline) => return Err(Error::CheckoutTimeout),
+            }
+        }
     }
 
     async fn get_internal(&self, request: &Request) -> Result<Guard, Error> {

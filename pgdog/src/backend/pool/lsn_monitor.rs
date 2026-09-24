@@ -1,6 +1,6 @@
 use std::{
     ops::{Deref, DerefMut},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
 use tokio::select;
@@ -47,7 +47,11 @@ SELECT
             COALESCE(pg_last_xact_replay_timestamp(), now())
         ELSE
             now()
-    END AS timestamp
+    END AS timestamp,
+    CASE
+        WHEN pg_is_in_recovery() THEN 0
+        ELSE ('x' || substr(pg_walfile_name(pg_current_wal_lsn()), 1, 8))::bit(32)::int
+    END AS timeline
 ";
 
 static AURORA_LSN_QUERY: &str = "
@@ -55,7 +59,8 @@ SELECT
     pg_is_in_recovery() AS replica,
     '0/0'::pg_lsn AS lsn,
     0::bigint AS offset_bytes,
-    now() AS timestamp
+    now() AS timestamp,
+    0 AS timeline
 ";
 
 /// LSN information.
@@ -86,7 +91,8 @@ impl From<StatsLsnStats> for LsnStats {
 
 impl LsnStats {
     /// How old the stats are.
-    pub(crate) fn lsn_age(&self, now: SystemTime) -> Duration {
+    #[cfg(test)]
+    pub(crate) fn lsn_age(&self, now: SystemTime) -> std::time::Duration {
         now.duration_since(self.fetched).unwrap_or_default()
     }
 
@@ -105,6 +111,7 @@ impl LsnStats {
             timestamp: value.get(3, Format::Text).unwrap_or_default(),
             fetched: SystemTime::now(),
             aurora,
+            timeline: value.get(4, Format::Text).unwrap_or_default(),
         }
         .into()
     }
@@ -235,7 +242,17 @@ impl LsnMonitor {
     }
 
     async fn get_connection(&self) -> Result<LsnConnection, Error> {
-        match self.pool.get(&Request::default()).await {
+        // Don't queue behind clients for the whole checkout_timeout: role
+        // detection must keep up during a failover. A check that can't get
+        // a pooled connection in time opens one of its own.
+        let checkout = safe_timeout(
+            self.pool.config().lsn_check_timeout,
+            self.pool.get(&Request::default()),
+        )
+        .await
+        .unwrap_or(Err(Error::CheckoutTimeout));
+
+        match checkout {
             Ok(conn) => Ok(LsnConnection::Guard(conn)),
             Err(Error::Offline) => Err(Error::Offline),
             Err(Error::CheckoutTimeout) => Ok(LsnConnection::Conn(Box::new(
@@ -273,6 +290,8 @@ impl DerefMut for LsnConnection {
 
 #[cfg(test)]
 mod test {
+    use std::time::Duration;
+
     use super::*;
 
     use pgdog_postgres_types::TimestampTz;
@@ -367,6 +386,7 @@ mod test {
             timestamp: TimestampTz::default(),
             fetched: SystemTime::now(),
             aurora: false,
+            timeline: 0,
         }
         .into();
 
@@ -473,6 +493,7 @@ mod test {
             timestamp: TimestampTz::default(),
             fetched: SystemTime::now(),
             aurora: true,
+            timeline: 0,
         }
         .into();
 
@@ -491,6 +512,7 @@ mod test {
             timestamp: TimestampTz::default(),
             fetched: SystemTime::now(),
             aurora: false,
+            timeline: 0,
         }
         .into();
 
