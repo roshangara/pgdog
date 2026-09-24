@@ -18,7 +18,10 @@ use crate::{
     config::{
         ConnectionRecovery, MultiTenant, PoolerMode, ReadWriteSplit, ReadWriteStrategy, User,
     },
-    frontend::{ClientRequest, RegexParser, router::round_robin},
+    frontend::{
+        ClientRequest, RegexParser,
+        router::{parser::function::FunctionRouting, round_robin},
+    },
     net::{
         bind::Parameter as BindParameter, messages::DataRow, messages::FrontendPid,
         parameter::ParameterValue,
@@ -61,6 +64,7 @@ pub(crate) struct Cluster {
     rw_strategy: ReadWriteStrategy,
     rw_split: ReadWriteSplit,
     read_after_write: Duration,
+    function_routing: Arc<FunctionRouting>,
     schema_admin: bool,
     stats: Arc<Mutex<ClusterMetrics>>,
     cross_shard_disabled: bool,
@@ -113,6 +117,7 @@ impl Default for Cluster {
             rw_strategy: Default::default(),
             rw_split: Default::default(),
             read_after_write: Default::default(),
+            function_routing: Default::default(),
             schema_admin: Default::default(),
             stats: Default::default(),
             cross_shard_disabled: Default::default(),
@@ -203,6 +208,7 @@ pub(crate) struct ClusterConfig<'a> {
     rw_strategy: ReadWriteStrategy,
     rw_split: ReadWriteSplit,
     read_after_write: Duration,
+    function_routing: FunctionRouting,
     schema_admin: bool,
     cross_shard_disabled: bool,
     two_pc: bool,
@@ -269,6 +275,10 @@ impl<'a> ClusterConfig<'a> {
             rw_strategy: general.read_write_strategy,
             rw_split: general.read_write_split,
             read_after_write: Duration::from_millis(general.read_after_write_ms),
+            function_routing: FunctionRouting::new(
+                &general.primary_functions,
+                general.route_unknown_functions_to_primary,
+            ),
             schema_admin: user.schema_admin,
             cross_shard_disabled: user
                 .cross_shard_disabled
@@ -322,6 +332,7 @@ impl Cluster {
             rw_strategy,
             rw_split,
             read_after_write,
+            function_routing,
             schema_admin,
             cross_shard_disabled,
             two_pc,
@@ -395,6 +406,7 @@ impl Cluster {
             rw_strategy,
             rw_split,
             read_after_write,
+            function_routing: Arc::new(function_routing),
             schema_admin,
             stats,
             cross_shard_disabled,
@@ -685,6 +697,11 @@ impl Cluster {
         self.read_after_write
     }
 
+    /// Functions that send a `SELECT` to the primary.
+    pub(crate) fn function_routing(&self) -> &FunctionRouting {
+        &self.function_routing
+    }
+
     /// Route queries to the primary by default unless an explicit role hint says otherwise.
     pub(crate) fn prefer_primary(&self) -> bool {
         self.rw_split == ReadWriteSplit::PreferPrimary
@@ -923,6 +940,11 @@ mod test {
                 prepared_statements: config.config.general.prepared_statements,
                 dry_run: config.config.general.dry_run,
                 expanded_explain: config.config.general.expanded_explain,
+                read_after_write: Duration::from_millis(config.config.general.read_after_write_ms),
+                function_routing: Arc::new(super::FunctionRouting::new(
+                    &config.config.general.primary_functions,
+                    config.config.general.route_unknown_functions_to_primary,
+                )),
                 query_parser: config.config.general.query_parser,
                 regex_parser: crate::frontend::RegexParser::new(
                     config.config.general.regex_parser_limit,
@@ -974,6 +996,11 @@ mod test {
                 prepared_statements: config.config.general.prepared_statements,
                 dry_run: config.config.general.dry_run,
                 expanded_explain: config.config.general.expanded_explain,
+                read_after_write: Duration::from_millis(config.config.general.read_after_write_ms),
+                function_routing: Arc::new(super::FunctionRouting::new(
+                    &config.config.general.primary_functions,
+                    config.config.general.route_unknown_functions_to_primary,
+                )),
                 query_parser: config.config.general.query_parser,
                 regex_parser: crate::frontend::RegexParser::new(
                     config.config.general.regex_parser_limit,

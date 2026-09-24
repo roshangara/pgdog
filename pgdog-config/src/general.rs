@@ -254,6 +254,23 @@ pub struct General {
     #[serde(default = "General::read_after_write_ms")]
     pub read_after_write_ms: u64,
 
+    /// Functions that write. A `SELECT` calling one of them is sent to the primary.
+    /// Entries are function names, optionally schema-qualified (`schema.name`). An unqualified
+    /// entry matches the function in any schema. A qualified entry matches calls qualified with
+    /// that schema, and unqualified calls, since `search_path` may resolve them to it.
+    ///
+    /// _Default:_ `[]`
+    #[serde(default)]
+    pub primary_functions: Vec<String>,
+
+    /// Send a `SELECT` that calls any function not known to be read-only to the primary.
+    /// Known read-only functions are the `pg_catalog` functions that are `IMMUTABLE` or `STABLE`
+    /// in every overload.
+    ///
+    /// _Default:_ `false`
+    #[serde(default = "General::route_unknown_functions_to_primary")]
+    pub route_unknown_functions_to_primary: bool,
+
     /// Path to the TLS certificate PgDog will use to setup TLS connections with clients.
     ///
     /// <https://docs.pgdog.dev/configuration/pgdog.toml/general/#tls_certificate>
@@ -932,6 +949,8 @@ impl Default for General {
             read_write_strategy: Self::read_write_strategy(),
             read_write_split: Self::read_write_split(),
             read_after_write_ms: Self::read_after_write_ms(),
+            primary_functions: Vec::new(),
+            route_unknown_functions_to_primary: Self::route_unknown_functions_to_primary(),
             tls_certificate: Self::tls_certificate(),
             tls_private_key: Self::tls_private_key(),
             tls_client_required: bool::default(),
@@ -1350,6 +1369,10 @@ impl General {
 
     fn read_after_write_ms() -> u64 {
         Self::env_or_default("PGDOG_READ_AFTER_WRITE_MS", 0)
+    }
+
+    fn route_unknown_functions_to_primary() -> bool {
+        Self::env_bool_or_default("PGDOG_ROUTE_UNKNOWN_FUNCTIONS_TO_PRIMARY", false)
     }
 
     fn prepared_statements() -> PreparedStatementsLevel {

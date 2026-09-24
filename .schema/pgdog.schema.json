@@ -88,6 +88,7 @@
         "prepared_statements_limit": 9223372036854775807,
         "prepared_statements_ttl": null,
         "prepared_statements_ttl_jitter": 30000,
+        "primary_functions": [],
         "pub_sub_channel_size": 0,
         "query_cache_limit": 1000,
         "query_log": null,
@@ -111,6 +112,7 @@
         "resharding_replication_retry_max_attempts": 5,
         "resharding_replication_retry_min_delay": 1000,
         "rollback_timeout": 5000,
+        "route_unknown_functions_to_primary": false,
         "server_lifetime": 86400000,
         "server_lifetime_jitter": 0,
         "sharding_lookup_cache_size": 67108864,
@@ -1104,6 +1106,14 @@
           "default": 30000,
           "minimum": 0
         },
+        "primary_functions": {
+          "description": "Functions that write. A `SELECT` calling one of them is sent to the primary.\nEntries are function names, optionally schema-qualified (`schema.name`). An unqualified\nentry matches the function in any schema. A qualified entry matches calls qualified with\nthat schema, and unqualified calls, since `search_path` may resolve them to it.\n\n_Default:_ `[]`",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "pub_sub_channel_size": {
           "description": "Enables support for pub/sub and configures the size of the background task queue.\n\n<https://docs.pgdog.dev/configuration/pgdog.toml/general/#pub_sub_channel_size>",
           "type": "integer",
@@ -1248,6 +1258,11 @@
           "format": "uint64",
           "default": 5000,
           "minimum": 0
+        },
+        "route_unknown_functions_to_primary": {
+          "description": "Send a `SELECT` that calls any function not known to be read-only to the primary.\nKnown read-only functions are the `pg_catalog` functions that are `IMMUTABLE` or `STABLE`\nin every overload.\n\n_Default:_ `false`",
+          "type": "boolean",
+          "default": false
         },
         "server_lifetime": {
           "description": "Maximum amount of time a server connection is allowed to exist.\n\n_Default:_ `86400000`\n\n<https://docs.pgdog.dev/configuration/pgdog.toml/general/#server_lifetime>",

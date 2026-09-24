@@ -26,6 +26,7 @@ impl QueryParser {
         // coverage; the primary/replica decision (`writes`) additionally
         // honours the conservative read/write split's transaction override.
         let mut mutates = false;
+        let functions = context.router_context.cluster.function_routing();
         walk::walk(stmt.into(), |node| match node {
             Node::CommonTableExpr(expr) => match expr.ctequery() {
                 Node::SelectStmt(_) => (),
@@ -36,8 +37,9 @@ impl QueryParser {
                 if let Some(f) =
                     Function::from_strings(f.funcname().into_iter().filter_map(Node::as_str))
                 {
-                    cross_shard = cross_shard || f.behavior().cross_shard;
-                    mutates = mutates || f.behavior().writes;
+                    let behavior = f.behavior(functions);
+                    cross_shard = cross_shard || behavior.cross_shard;
+                    mutates = mutates || behavior.writes;
                 }
             }
             _ => (),
