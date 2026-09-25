@@ -235,11 +235,12 @@ impl LoadBalancer {
     /// most WAL. Stats of a server that stopped answering are kept, so a
     /// crashed primary can't beat the replica promoted in its place. If no
     /// server reports being a primary, a primary that is now in recovery is
-    /// dropped at once, and writes wait for the next election.
+    /// dropped at once, and writes wait for the next election. The primary
+    /// that lost its role loses its connections too ([`Pool::primary_lost`]).
     ///
     /// Returns true if the elected primary changed.
     pub(crate) fn redetect_roles(&self) -> bool {
-        let before = self.primary().map(|pool| pool.addr().clone());
+        let before = self.primary().cloned();
         let targets = self
             .targets
             .iter()
@@ -279,8 +280,15 @@ impl LoadBalancer {
         }
 
         let elected = self.primary().cloned();
-        let changed = before.as_ref() != elected.as_ref().map(|pool| pool.addr());
+        let changed =
+            before.as_ref().map(|pool| pool.addr()) != elected.as_ref().map(|pool| pool.addr());
         self.publish_primary(elected);
+
+        // Writes now wait for or go to the new primary; the statements still
+        // on the old one end, whether it answers or not.
+        if changed && let Some(old) = before {
+            old.primary_lost();
+        }
 
         changed
     }

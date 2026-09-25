@@ -12,6 +12,7 @@ use crate::net::messages::{BackendKeyData, BackendPid, FrontendPid};
 use pgdog_config::Role;
 use pgdog_stats::RoleSpecificConfig;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 use super::{Config, Error, Pool, Request, Stats, Taken, Waiter, lsn_monitor::ReplicaLag};
 
@@ -54,6 +55,9 @@ pub(super) struct Inner {
     pub(super) credentials_generation: u64,
     /// Pool role.
     pub(super) role: Role,
+    /// Every connection the pool makes holds a child of the term it was made
+    /// in; the term ends when the server loses the primary role.
+    pub(super) term: CancellationToken,
 }
 
 impl std::fmt::Debug for Inner {
@@ -88,6 +92,7 @@ impl Inner {
             replica_lag: ReplicaLag::default(),
             credentials_generation: 0,
             role: Role::Auto,
+            term: CancellationToken::new(),
         }
     }
     /// Total number of connections managed by the pool.
@@ -329,6 +334,18 @@ impl Inner {
     pub(super) fn bump_credentials_generation(&mut self) {
         self.credentials_generation += 1;
         self.dump_idle();
+    }
+
+    /// The server lost the primary role: end the term. Every connection made
+    /// in it is retired: the idle ones close now, the checked-out ones at
+    /// their next read or write (or check-in). Connections made from now on
+    /// are not. Returns how many were idle and how many checked out.
+    pub(super) fn end_term(&mut self) -> (usize, usize) {
+        std::mem::take(&mut self.term).cancel();
+        let idle = self.idle();
+        self.idle_connections.clear();
+
+        (idle, self.checked_out())
     }
 
     /// Dump all idle connections.

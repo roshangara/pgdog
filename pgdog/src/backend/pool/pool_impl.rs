@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RawMutex, lock_api::MutexGuard};
 use pgdog_config::Role;
 use tokio::sync::Notify;
 use tokio::time::Instant;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::backend::pool::LsnStats;
 use crate::backend::{ConnectReason, DisconnectReason, Server, ServerOptions};
@@ -355,6 +355,9 @@ impl Pool {
             // Propagate pause state so a paused database stays paused after reload.
             to_guard.paused = from_guard.paused;
             from_guard.online = false;
+            // The connections keep the term they were made in: the new pool
+            // ends it if the server loses the primary role.
+            to_guard.term = from_guard.term.clone();
 
             let (idle, taken) = from_guard.move_conns_to(destination);
             for server in idle {
@@ -402,6 +405,23 @@ impl Pool {
                 self.addr()
             );
         }
+    }
+
+    /// The election chose another primary, or none: this server lost the
+    /// primary role. Its connections end as PostgreSQL ends its sessions when
+    /// it is demoted (FATAL 57P01): the idle ones now, the ones clients hold
+    /// at their next read or write. A statement in flight on a server that
+    /// stopped answering fails now instead of at the client's own timeout,
+    /// and the client's retry goes to the new primary. Connections made from
+    /// now on (reads on this server as a replica) are not affected.
+    pub(crate) fn primary_lost(&self) {
+        let (idle, checked_out) = self.lock().end_term();
+        info!(
+            "no longer the primary, closing its connections: {} idle, {} checked out [{}]",
+            idle,
+            checked_out,
+            self.addr()
+        );
     }
 
     /// Changes each time the replica is found down.

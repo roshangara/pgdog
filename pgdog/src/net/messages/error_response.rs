@@ -220,6 +220,21 @@ impl ErrorResponse {
         }
     }
 
+    /// The server of the client's connection is no longer the primary (the
+    /// door elected another, or none). The session ends as PostgreSQL ends its
+    /// own when it is demoted; whether a statement in flight ran is unknown.
+    pub(crate) fn primary_changed() -> ErrorResponse {
+        ErrorResponse {
+            severity: "FATAL".into(),
+            code: "57P01".into(),
+            message: "terminating connection because the server is no longer the primary".into(),
+            detail: None,
+            context: None,
+            file: None,
+            routine: None,
+        }
+    }
+
     pub(crate) fn syntax<T: Into<String>>(err: T) -> ErrorResponse {
         Self {
             severity: "ERROR".into(),

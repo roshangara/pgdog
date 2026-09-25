@@ -7,7 +7,9 @@
 //! * `server_connections_opened_total{reason}`: server connections made,
 //!   by why (`client_waiting`, `below_min`, `lsn_check`, `pub_sub`, ...).
 //! * `server_connections_closed_total{reason}`: server connections closed,
-//!   by why; `idle` is `idle_timeout` at work.
+//!   by why; `idle` is `idle_timeout` at work, `primary_changed` the
+//!   connections to a primary that lost its role (the election chose
+//!   another server, or none).
 //! * `server_connections{host,port,kind}`: the server connections held now,
 //!   by what holds them: a pool, the server's LSN check, or a LISTEN/NOTIFY
 //!   listener. The sum per server is this door's share of its
@@ -35,7 +37,7 @@ const OPEN_LABELS: [&str; 8] = [
     "other",
 ];
 
-const CLOSE_LABELS: [&str; 12] = [
+const CLOSE_LABELS: [&str; 13] = [
     "idle",
     "old",
     "error",
@@ -47,6 +49,7 @@ const CLOSE_LABELS: [&str; 12] = [
     "server_closed",
     "credentials_refresh",
     "replication_mode",
+    "primary_changed",
     "other",
 ];
 
@@ -79,7 +82,8 @@ fn close_index(reason: DisconnectReason) -> usize {
         DisconnectReason::ServerClosed => 8,
         DisconnectReason::CredentialsRefresh => 9,
         DisconnectReason::ReplicationMode => 10,
-        DisconnectReason::Other => 11,
+        DisconnectReason::PrimaryChanged => 11,
+        DisconnectReason::Other => 12,
     }
 }
 

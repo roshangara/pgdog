@@ -10,6 +10,7 @@ use tokio::{
     spawn,
     time::Instant,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use super::{
@@ -159,6 +160,9 @@ pub(crate) struct Server {
     /// Compared against the pool's generation on check-in; a mismatch means
     /// the Vault lease rotated and this connection must be closed.
     credentials_generation: u64,
+    /// The pool's term this connection was made in: cancelled when the
+    /// server loses the primary role, and the connection is retired.
+    term: CancellationToken,
 }
 
 impl MemoryUsage for Server {
@@ -442,6 +446,7 @@ impl Server {
             password_attempts: 1, // This is going to be changed by parent caller.
             max_age: None,
             credentials_generation: 0,
+            term: CancellationToken::new(),
         };
 
         server.stats.memory_used(server.memory_stats()); // Stream capacity.
@@ -543,6 +548,10 @@ impl Server {
     async fn send_stream(&mut self, message: &ProtocolMessage) -> Result<(), Error> {
         trace!("{:#?} >>> [{}]", message, self.addr());
 
+        if self.retired() {
+            return Err(self.retire());
+        }
+
         match self.stream().send(message).await {
             Ok(sent) => self.stats.send(sent, message.code() as u8),
             Err(err) => {
@@ -578,7 +587,18 @@ impl Server {
                 // never substitute a non-unique value here.
                 break message.backend(self.id);
             }
-            match self.stream_buffer.read(self.stream.as_mut().unwrap()).await {
+            // A statement in flight on a server that lost the primary role
+            // ends now: nothing else ends it if the server stopped answering.
+            let read = tokio::select! {
+                biased;
+                read = self.stream_buffer.read(self.stream.as_mut().unwrap()) => Some(read),
+                _ = self.term.cancelled() => None,
+            };
+            let Some(read) = read else {
+                return Err(self.retire());
+            };
+
+            match read {
                 Ok(message) => {
                     // INVARIANT: omni dedup in multi_shard relies on this being process-unique;
                     // never substitute a non-unique value here.
@@ -814,6 +834,10 @@ impl Server {
     /// answer's ReadyForQuery often took the FATAL with it into this buffer,
     /// where no look at the socket can see it.
     pub(crate) fn liveness(&mut self) -> Liveness {
+        if self.retired() {
+            return Liveness::Closed;
+        }
+
         if self.stream_buffer.has_data() {
             return Liveness::DataPending;
         }
@@ -887,7 +911,7 @@ impl Server {
 
     /// Close the connection, don't do any recovery.
     pub(crate) fn is_force_close(&self) -> bool {
-        self.stats().get_state() == State::ForceClose || self.io_in_progress()
+        self.stats().get_state() == State::ForceClose || self.io_in_progress() || self.retired()
     }
 
     /// Indicate that this connection should be closed
@@ -1223,6 +1247,27 @@ impl Server {
         self.credentials_generation = generation;
     }
 
+    /// Made in the pool's term: when the server loses the primary role, the
+    /// pool ends it and this connection is retired.
+    #[inline]
+    pub(crate) fn set_term(&mut self, term: CancellationToken) {
+        self.term = term;
+    }
+
+    /// The server lost the primary role since this connection was made: it
+    /// sends nothing more, and a read on it fails at once.
+    #[inline]
+    pub(crate) fn retired(&self) -> bool {
+        self.term.is_cancelled()
+    }
+
+    /// Fail a retired connection the way PostgreSQL ends a session when it
+    /// is demoted: FATAL 57P01, the connection closed.
+    fn retire(&mut self) -> Error {
+        self.stats.state(State::ForceClose);
+        Error::ExecutionError(Box::new(ErrorResponse::primary_changed()))
+    }
+
     /// How long this connection has been idle.
     #[inline]
     pub(crate) fn idle_for(&self, instant: Instant) -> Duration {
@@ -1329,7 +1374,13 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stats().disconnect();
         if let Some(mut stream) = self.stream.take() {
-            let reason = self.disconnect_reason.take().unwrap_or_default();
+            // Whatever step noticed it, a connection whose server lost the
+            // primary role closes for that.
+            let reason = if self.retired() {
+                DisconnectReason::PrimaryChanged
+            } else {
+                self.disconnect_reason.take().unwrap_or_default()
+            };
             crate::stats::connections::server_closed(reason);
             info!(
                 target: CONNECTIONS,
@@ -1413,6 +1464,7 @@ pub(crate) mod test {
                 password_attempts: 1,
                 max_age: None,
                 credentials_generation: 0,
+                term: CancellationToken::new(),
             }
         }
     }

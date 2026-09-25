@@ -11,8 +11,8 @@ use tokio::task::yield_now;
 use tokio::time::{Instant, sleep, timeout};
 use tokio_util::task::TaskTracker;
 
-use crate::backend::ConnectReason;
 use crate::backend::pool::token_cache::TokenCache;
+use crate::backend::{ConnectReason, DisconnectReason};
 use crate::net::ProtocolMessage;
 use crate::net::{Parse, Protocol, Query, Sync};
 use crate::state::State;
@@ -1376,4 +1376,98 @@ async fn test_an_idle_pool_empties_while_it_is_health_checked() {
     assert_eq!(pool.lock().total(), 1);
 
     pool.shutdown();
+}
+
+/// A server that loses the primary role loses the connections made while it
+/// had it (ganjban lab B-16): the idle ones close at once, a statement in
+/// flight fails with 57P01 without waiting for the server, and nothing more
+/// is sent on them. A connection made afterwards, and the connections of
+/// another server's pool (a reader), are not touched.
+#[tokio::test]
+async fn test_primary_lost_retires_the_connections_made_before() {
+    crate::logger();
+
+    let local = |role| {
+        let pool = Pool::new(&PoolConfig {
+            address: Address {
+                host: "127.0.0.1".into(),
+                port: 5432,
+                database_name: "pgdog".into(),
+                user: "pgdog".into(),
+                passwords: vec!["pgdog".into()],
+                ..Default::default()
+            },
+            config: Config {
+                max: 2,
+                min: 0,
+                ..Config::default()
+            },
+        });
+        pool.set_role(role);
+        pool.launch();
+        pool
+    };
+    let primary = local(pgdog_config::Role::Primary);
+    let reader = local(pgdog_config::Role::Replica);
+
+    let idle = primary.get(&Request::default()).await.unwrap();
+    let mut in_flight = primary.get(&Request::default()).await.unwrap();
+    drop(idle);
+    let mut reading = reader.get(&Request::default()).await.unwrap();
+    timeout(Duration::from_secs(1), async {
+        while primary.lock().idle() != 1 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    in_flight
+        .send(&vec![Query::new("SELECT pg_sleep(3)").into()].into())
+        .await
+        .unwrap();
+    let statement = spawn(async move {
+        let started = Instant::now();
+        let result = in_flight.read().await;
+        (result, started.elapsed(), in_flight)
+    });
+    sleep(Duration::from_millis(200)).await;
+
+    let closed = crate::stats::connections::closed(DisconnectReason::PrimaryChanged);
+    primary.primary_lost();
+    assert_eq!(primary.lock().idle(), 0, "the idle connection closes now");
+
+    let (result, took, mut in_flight) = timeout(Duration::from_secs(1), statement)
+        .await
+        .expect("the statement in flight ends now")
+        .unwrap();
+    assert!(took < Duration::from_secs(1), "took {took:?}");
+    match result {
+        Err(crate::backend::Error::ExecutionError(err)) => {
+            assert_eq!(err.code, "57P01");
+            assert_eq!(err.severity, "FATAL");
+        }
+        other => panic!("expected FATAL 57P01, got {other:?}"),
+    }
+    assert!(in_flight.is_force_close());
+    let refused = in_flight
+        .send(&vec![Query::new("SELECT 1").into()].into())
+        .await;
+    assert!(refused.is_err(), "nothing more is sent to the old primary");
+    drop(in_flight);
+    assert!(crate::stats::connections::closed(DisconnectReason::PrimaryChanged) >= closed + 2);
+
+    // The reader's connection serves on.
+    assert!(!reading.retired());
+    reading.execute("SELECT 1").await.unwrap();
+    drop(reading);
+
+    // So does a connection made after the change.
+    let mut after = primary.get(&Request::default()).await.unwrap();
+    assert!(!after.retired());
+    after.execute("SELECT 1").await.unwrap();
+    drop(after);
+
+    primary.shutdown();
+    reader.shutdown();
 }

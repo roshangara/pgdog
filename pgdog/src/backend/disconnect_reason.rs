@@ -13,6 +13,8 @@ pub(crate) enum DisconnectReason {
     Healthcheck,
     CredentialsRefresh,
     ServerClosed,
+    /// The server lost the primary role while the connection was open.
+    PrimaryChanged,
     #[default]
     Other,
 }
@@ -32,6 +34,7 @@ impl Display for DisconnectReason {
             Self::Healthcheck => "standalone healthcheck",
             Self::CredentialsRefresh => "credentials refresh",
             Self::ServerClosed => "server closed",
+            Self::PrimaryChanged => "primary changed",
         };
 
         write!(f, "{}", reason)

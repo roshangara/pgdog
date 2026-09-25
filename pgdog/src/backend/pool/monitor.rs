@@ -338,9 +338,10 @@ impl Monitor {
         match Self::create_connection(&self.pool, reason).await {
             Ok(conn) => {
                 let now = Instant::now();
-                let server = Box::new(conn);
+                let mut server = Box::new(conn);
                 let mut guard = self.pool.lock();
                 if guard.online {
+                    server.set_term(guard.term.child_token());
                     guard.put(server, now)?;
                 }
                 Ok(true)

@@ -30,6 +30,7 @@ mod omni;
 mod pipeline_execution;
 pub(crate) mod prelude;
 mod prepared_syntax_error;
+mod primary_changed;
 mod pub_sub;
 mod query_events;
 mod read_after_write;
