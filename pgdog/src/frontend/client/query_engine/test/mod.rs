@@ -47,6 +47,7 @@ mod set;
 mod set_schema_sharding;
 mod sharded;
 mod sharded_prepared;
+mod silent_proxy;
 mod spliced;
 mod temp_table;
 mod test_omnisharded;

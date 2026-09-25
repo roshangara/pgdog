@@ -316,7 +316,10 @@ pub(crate) struct SpawnedClient {
 }
 
 impl SpawnedClient {
-    async fn new(params: Parameters) -> Self {
+    /// Spawn a client after the login phase.
+    ///
+    /// Config needs to be loaded.
+    pub(crate) async fn new(params: Parameters) -> Self {
         let (conn, client) = new_client_pair(params).await;
 
         let handle = tokio::spawn(async move {
