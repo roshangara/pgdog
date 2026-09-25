@@ -20,7 +20,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 
 use super::{Stats, StatsSnapshot, channel_size};
-use crate::util::safe_sleep;
+use crate::log_sink::CONNECTIONS;
+use crate::util::{safe_interval, safe_sleep};
 use crate::{
     backend::{self, ConnectReason, DisconnectReason, Pool, databases::User, pool::Error},
     config::config,
@@ -250,41 +251,49 @@ impl PubSubListener {
         let pool_key = listener.pool_key.clone();
         let pool = listener.pool.clone();
         let comms = listener.comms.clone();
-        tasks::spawn("pub(crate) sub", async move {
+        tasks::spawn("pub/sub listener", async move {
+            select! {
+                _ = comms.start.notified() => {}
+                _ = comms.shutdown.cancelled() => return,
+            }
+
+            // The server connection is made for the first LISTEN or NOTIFY,
+            // and closed after idle_timeout with no channel listened to: a
+            // tenant that never uses LISTEN costs no connection, one that
+            // stopped costs none after idle_timeout. After an error, the
+            // channels clients still listen on are listened on again at once.
+            let mut first = None;
             loop {
-                select! {
-                    _ = comms.start.notified() => {}
-                    _ = comms.shutdown.cancelled() => {
-                        rx.close();
-                    }
+                if first.is_none() && !has_listeners(&channels, &pool_key) {
+                    first = select! {
+                        request = rx.recv() => match request {
+                            Some(request) => Some(request),
+                            None => break,
+                        },
+                        _ = comms.shutdown.cancelled() => break,
+                    };
                 }
 
-                if rx.is_closed() {
-                    break;
-                }
+                let result = select! {
+                    _ = comms.shutdown.cancelled() => break,
+                    result = Self::run(id, &pool, &pool_key, &mut rx, channels.clone(), first.take()) => result,
+                };
 
-                select! {
-                    _ = comms.shutdown.cancelled() => {
-                        rx.close(); // Drain remaining messages.
-                    }
-
-                    result = Self::run(id, &pool, &pool_key, &mut rx, channels.clone()) => {
-                        if let Err(err) = result {
-                            error!("pub/sub error: {} [{}]", err, pool.addr());
-                            // Don't reconnect for another connect attempt delay
-                            // to avoid connection storms during incidents.
-                            select! {
-                                _ = safe_sleep(Duration::from_millis(config().config.general.connect_attempt_delay)) => {}
-                                _ = comms.shutdown.cancelled() => rx.close(),
-                            }
+                match result {
+                    Ok(Ended::Idle) => continue,
+                    Ok(Ended::Closed) => break,
+                    Err(err) => {
+                        error!("pub/sub error: {} [{}]", err, pool.addr());
+                        // Don't reconnect for another connect attempt delay
+                        // to avoid connection storms during incidents.
+                        select! {
+                            _ = safe_sleep(Duration::from_millis(config().config.general.connect_attempt_delay)) => {}
+                            _ = comms.shutdown.cancelled() => break,
                         }
                     }
                 }
-
-                if rx.is_closed() {
-                    break;
-                }
             }
+            rx.close();
         });
 
         listener
@@ -343,17 +352,21 @@ impl PubSubListener {
             .map_err(|_| Error::Offline)
     }
 
-    // Run the listener task.
+    // Run the listener task: until the connection fails, the listener is
+    // shut down (`Ended::Closed`) or nothing needed it for idle_timeout
+    // (`Ended::Idle`).
     async fn run(
         id: FrontendPid,
         pool: &Pool,
         pool_key: &PoolKey,
         rx: &mut mpsc::Receiver<Request>,
         channels: Channels,
-    ) -> Result<(), backend::Error> {
-        info!("pub/sub started [{}]", pool.addr());
+        first: Option<Request>,
+    ) -> Result<Ended, backend::Error> {
+        info!(target: CONNECTIONS, "pub/sub started [{}]", pool.addr());
 
         let mut server = pool.standalone(ConnectReason::PubSub).await?;
+        let _connected = Connected::new(pool);
 
         server
             .link_client(
@@ -368,7 +381,7 @@ impl PubSubListener {
 
         // Re-listen on this pool's channels when re-starting the task.
         // We don't lose LISTEN commands.
-        let resub = channels
+        let mut resub = channels
             .lock()
             .get(pool_key)
             .map(|channels| {
@@ -378,10 +391,16 @@ impl PubSubListener {
                     .collect::<Vec<ProtocolMessage>>()
             })
             .unwrap_or_default();
+        resub.extend(first.map(ProtocolMessage::from));
 
         if !resub.is_empty() {
             server.send(&resub.into()).await?;
         }
+
+        let idle_timeout = pool.config().idle_timeout;
+        let mut idle = safe_interval(idle_timeout);
+        idle.tick().await;
+        let mut used = false;
 
         loop {
             select! {
@@ -418,17 +437,97 @@ impl PubSubListener {
                 req = rx.recv() => {
                     if let Some(req) = req {
                         debug!("pub/sub request {:?}", req);
+                        used = true;
                         server.send(&vec![req.into()].into()).await?;
                     } else {
                         server.disconnect_reason(DisconnectReason::Offline);
-                        break;
+                        return Ok(Ended::Closed);
                     }
+                }
+
+                _ = idle.tick() => {
+                    if !used && forget_unlistened(&channels, pool_key) {
+                        server.disconnect_reason(DisconnectReason::Idle);
+                        return Ok(Ended::Idle);
+                    }
+                    used = false;
                 }
             }
         }
 
-        Ok(())
+        Ok(Ended::Idle)
     }
+}
+
+/// Why the listener's connection ended.
+#[derive(Debug, PartialEq)]
+enum Ended {
+    /// Nothing needed it for idle_timeout; the next request connects again.
+    Idle,
+    /// The listener is shut down.
+    Closed,
+}
+
+/// A client listens on one of this pool's channels.
+fn has_listeners(channels: &Channels, pool_key: &PoolKey) -> bool {
+    channels.lock().get(pool_key).is_some_and(|channels| {
+        channels
+            .values()
+            .any(|channel| channel.stats.get().listeners > 0)
+    })
+}
+
+/// Drop this pool's channels no client listens on; true when none is left.
+fn forget_unlistened(channels: &Channels, pool_key: &PoolKey) -> bool {
+    let mut guard = channels.lock();
+    let Some(pool_channels) = guard.get_mut(pool_key) else {
+        return true;
+    };
+    pool_channels.retain(|_, channel| channel.stats.get().listeners > 0);
+    if pool_channels.is_empty() {
+        guard.remove(pool_key);
+        true
+    } else {
+        false
+    }
+}
+
+/// Listener connections held now, by server.
+static CONNECTED: Lazy<Mutex<HashMap<(String, u16), usize>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Counts a listener's server connection while it is held.
+struct Connected {
+    key: (String, u16),
+}
+
+impl Connected {
+    fn new(pool: &Pool) -> Self {
+        let key = (pool.addr().host.clone(), pool.addr().port);
+        *CONNECTED.lock().entry(key.clone()).or_default() += 1;
+        Self { key }
+    }
+}
+
+impl Drop for Connected {
+    fn drop(&mut self) {
+        let mut connected = CONNECTED.lock();
+        if let Some(count) = connected.get_mut(&self.key) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                connected.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// Listener connections held now, by server.
+pub(crate) fn connections() -> Vec<((String, u16), usize)> {
+    CONNECTED
+        .lock()
+        .iter()
+        .map(|(key, count)| (key.clone(), *count))
+        .collect()
 }
 
 #[cfg(test)]
@@ -707,5 +806,56 @@ mod test {
             .expect("notify request");
 
         expect_notify(&mut rx, "events", "payload").await;
+    }
+
+    /// The listener connects for the first LISTEN or NOTIFY, not before, and
+    /// leaves the server after idle_timeout with nobody listening (A-10).
+    #[tokio::test]
+    async fn test_the_listener_connects_when_used_and_leaves_when_idle() {
+        use crate::backend::pool::{Address, Config, PoolConfig};
+
+        crate::logger();
+        let pool = Pool::new(&PoolConfig {
+            address: Address::new_test(),
+            config: Config {
+                min: 0,
+                idle_timeout: Duration::from_millis(300),
+                ..Config::default()
+            },
+        });
+        pool.launch();
+        let held = || -> usize { connections().into_iter().map(|(_, n)| n).sum() };
+        let wait_for = |n: usize| async move {
+            for _ in 0..100 {
+                if held() == n {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("expected {n} listener connections, got {}", held());
+        };
+
+        let listener = PubSubListener::new(&pool, &test_user("pgdog", "pgdog"), 0);
+        listener.launch();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(held(), 0, "no connection before a LISTEN");
+
+        let subscription = listener.listen("lazy_listener").await.unwrap();
+        wait_for(1).await;
+
+        // Still listened to: it stays past idle_timeout.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(held(), 1);
+
+        drop(subscription);
+        wait_for(0).await;
+
+        // A NOTIFY connects again.
+        listener.notify("lazy_listener", "payload").await.unwrap();
+        wait_for(1).await;
+
+        listener.shutdown();
+        wait_for(0).await;
+        pool.shutdown();
     }
 }

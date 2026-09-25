@@ -999,7 +999,12 @@ impl Server {
     pub(crate) async fn healthcheck(&mut self, query: &str) -> Result<(), Error> {
         debug!("running healthcheck \"{}\" [{}]", query, self.addr);
 
+        // A health check is not a client's use: the connection's idle time
+        // keeps running, or idle_timeout would never close a connection
+        // that is only ever checked.
+        let last_used = self.stats.last_used();
         self.execute(query).await?;
+        self.stats.set_last_used(last_used);
 
         self.stats.healthcheck();
 

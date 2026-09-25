@@ -370,7 +370,22 @@ impl Monitor {
             if !guard.online {
                 return Ok(false);
             }
-            guard.take(&Request::default())?
+            let conn = guard.take(&Request::default())?;
+
+            // A pool holding no idle connection with a minimum of 0 has
+            // nothing to check. Opening one here would open a connection
+            // per pool every interval, and the pool would never empty: a
+            // client's next connection, and the server's LSN check, say
+            // whether the server answers. An unhealthy pool is still
+            // checked when nothing else would bring it back.
+            if conn.is_none()
+                && guard.min() == 0
+                && (pool.healthy() || pool.config().replica_down_detection)
+            {
+                return Ok(pool.healthy());
+            }
+
+            conn
         };
 
         let healthcheck_timeout = pool.config().healthcheck_timeout;

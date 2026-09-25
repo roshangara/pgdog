@@ -4,7 +4,7 @@ pub(crate) mod notification;
 pub(crate) mod stats;
 
 pub(crate) use client::PubSubClient;
-pub(crate) use listener::PubSubListener;
+pub(crate) use listener::{PubSubListener, connections};
 pub(crate) use stats::{Stats, StatsSnapshot};
 
 use crate::config::config;

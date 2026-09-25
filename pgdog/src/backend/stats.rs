@@ -355,6 +355,12 @@ impl Stats {
         self.local.created_at
     }
 
+    /// Set when the connection was last used (a health check doesn't count).
+    pub(crate) fn set_last_used(&mut self, at: Instant) {
+        self.local.last_used = at;
+        self.sync_to_shared();
+    }
+
     /// Get last_used timestamp (local, no lock).
     #[inline]
     pub(crate) fn last_used(&self) -> Instant {

@@ -25,6 +25,7 @@ use super::{
     State, Waiting,
     lb::TargetHealth,
     lsn_monitor::{LsnMonitor, ReplicaLag},
+    server_check,
 };
 use crate::util::safe_timeout;
 
@@ -106,11 +107,22 @@ impl Pool {
 
     /// Launch the maintenance loop, bringing the pool online.
     pub(crate) fn launch(&self) {
-        let mut guard = self.lock();
-        if !guard.online {
+        let launched = {
+            let mut guard = self.lock();
+            let launched = !guard.online;
             guard.online = true;
+            launched
+        };
+
+        if launched {
             Monitor::run(self);
-            LsnMonitor::run(self);
+            // With a connection of its own, the LSN check runs once per
+            // server for all its pools; otherwise on each pool's connections.
+            if self.inner.config.replica_down_detection {
+                server_check::join(self);
+            } else {
+                LsnMonitor::run(self);
+            }
         }
     }
 
@@ -449,12 +461,15 @@ impl Pool {
             user = %self.addr().user,
             "pool offline"
         );
-        let mut guard = self.lock();
-        guard.online = false;
-        guard.dump_idle();
-        guard.close_waiters(Error::Offline);
+        {
+            let mut guard = self.lock();
+            guard.online = false;
+            guard.dump_idle();
+            guard.close_waiters(Error::Offline);
+        }
         self.comms().shutdown.cancel();
         self.comms().ready.notify_waiters();
+        server_check::leave(self);
     }
 
     /// Sets the `Pool` offline (to refuse more connections)
@@ -558,6 +573,30 @@ impl Pool {
     #[cfg(test)]
     pub(crate) fn set_lsn_stats(&self, stats: LsnStats) {
         *self.inner().lsn_stats.write() = stats;
+    }
+
+    /// Keep the stats of an LSN check. A change of role wakes the shard's
+    /// role detection at once.
+    pub(crate) fn store_lsn_stats(&self, stats: LsnStats) {
+        let mut guard = self.inner.lsn_stats.write();
+        if stats.replica != guard.replica {
+            self.inner.lsn_role_change.notify_one();
+        }
+        *guard = stats;
+    }
+
+    /// The server answered its LSN check.
+    pub(crate) fn lsn_check_passed(&self) {
+        if !self.healthy() {
+            self.inner.health.toggle(true);
+        }
+    }
+
+    /// The server didn't answer its LSN check: unhealthy (a primary that
+    /// doesn't answer is no fresh source for reads), and a replica is down.
+    pub(crate) fn lsn_check_failed(&self, reason: impl std::fmt::Display) {
+        self.replica_down(reason);
+        self.inner.health.toggle(false);
     }
 
     /// Set pool role returning true if the role changed.

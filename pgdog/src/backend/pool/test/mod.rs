@@ -1318,3 +1318,62 @@ async fn test_replica_down_releases_waiters() {
     drop(held);
     pool.shutdown();
 }
+
+/// A pool with a minimum of 0 empties after idle_timeout even while its idle
+/// connection is health-checked (a check is not a client's use), and an
+/// empty pool opens no connection to be checked (ganjban A-10).
+#[tokio::test]
+async fn test_an_idle_pool_empties_while_it_is_health_checked() {
+    crate::logger();
+
+    let config = Config {
+        max: 2,
+        min: 0,
+        idle_timeout: Duration::from_millis(400),
+        idle_healthcheck_interval: Duration::from_millis(50),
+        idle_healthcheck_delay: Duration::from_millis(10),
+        ..Config::default()
+    };
+
+    let pool = Pool::new(&PoolConfig {
+        address: Address {
+            host: "127.0.0.1".into(),
+            port: 5432,
+            database_name: "pgdog".into(),
+            user: "pgdog".into(),
+            passwords: vec!["pgdog".into()],
+            ..Default::default()
+        },
+        config,
+    });
+    pool.launch();
+
+    // One client, then nothing.
+    drop(pool.get(&Request::default()).await.unwrap());
+    assert_eq!(pool.lock().total(), 1);
+
+    // The idle connection is health-checked meanwhile...
+    sleep(Duration::from_millis(250)).await;
+    assert_eq!(pool.lock().total(), 1);
+    assert!(pool.state().stats.counts.healthchecks >= 2);
+
+    // ... and closes after idle_timeout all the same.
+    sleep(Duration::from_millis(700)).await;
+    assert_eq!(pool.lock().total(), 0);
+
+    // An empty pool opens no connection to check.
+    let opened = crate::stats::connections::opened(ConnectReason::Healthcheck);
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        crate::stats::connections::opened(ConnectReason::Healthcheck),
+        opened
+    );
+    assert_eq!(pool.lock().total(), 0);
+    assert!(pool.healthy());
+
+    // The next client gets a new connection.
+    drop(pool.get(&Request::default()).await.unwrap());
+    assert_eq!(pool.lock().total(), 1);
+
+    pool.shutdown();
+}

@@ -8,9 +8,15 @@
 //!   by why (`client_waiting`, `below_min`, `lsn_check`, `pub_sub`, ...).
 //! * `server_connections_closed_total{reason}`: server connections closed,
 //!   by why; `idle` is `idle_timeout` at work.
+//! * `server_connections{host,port,kind}`: the server connections held now,
+//!   by what holds them: a pool, the server's LSN check, or a LISTEN/NOTIFY
+//!   listener. The sum per server is this door's share of its
+//!   `max_connections`.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::backend::databases::databases;
 use crate::backend::{ConnectReason, DisconnectReason};
 
 use super::pools::PoolMetric;
@@ -104,6 +110,33 @@ pub(crate) fn closed(reason: DisconnectReason) -> u64 {
     CLOSED[close_index(reason)].load(Ordering::Relaxed)
 }
 
+/// Server connections held now, by (host, port) and what holds them.
+fn held() -> BTreeMap<(String, u16, &'static str), usize> {
+    let mut held = BTreeMap::new();
+
+    for cluster in databases().all().values() {
+        for shard in cluster.shards() {
+            for pool in shard.pools() {
+                let state = pool.state();
+                let addr = pool.addr();
+                *held
+                    .entry((addr.host.clone(), addr.port, "pool"))
+                    .or_default() += state.idle + state.checked_out;
+            }
+        }
+    }
+
+    for ((host, port), count) in crate::backend::pool::server_check::connections() {
+        *held.entry((host, port, "lsn_check")).or_default() += count;
+    }
+
+    for ((host, port), count) in crate::backend::pub_sub::connections() {
+        *held.entry((host, port, "pub_sub")).or_default() += count;
+    }
+
+    held
+}
+
 pub(crate) struct Connections;
 
 impl Connections {
@@ -138,6 +171,18 @@ impl Connections {
                 measurement: count.load(Ordering::Relaxed).into(),
             })
             .collect();
+        let held = held()
+            .into_iter()
+            .map(|((host, port, kind), count)| Measurement {
+                labels: vec![
+                    ("host".into(), host),
+                    ("port".into(), port.to_string()),
+                    ("kind".into(), kind.into()),
+                ],
+                measurement: count.into(),
+            })
+            .collect();
+
         vec![
             counter(
                 "client_connections_total",
@@ -154,6 +199,16 @@ impl Connections {
                 "Server connections closed, by why (idle: idle_timeout).",
                 closed,
             ),
+            Metric::new(PoolMetric {
+                name: "server_connections".into(),
+                measurements: held,
+                help: "Server connections held now, by server and by what holds them: pool, \
+                       lsn_check (the server's check, one per server), pub_sub (a LISTEN/NOTIFY \
+                       listener)."
+                    .into(),
+                unit: None,
+                metric_type: None,
+            }),
         ]
     }
 }
@@ -185,5 +240,6 @@ mod test {
         assert!(rendered.contains(r#"server_connections_closed_total{reason="idle"} "#));
         assert!(rendered.contains(r#"server_connections_opened_total{reason="lsn_check"} "#));
         assert!(rendered.contains("# TYPE client_connections_total counter"));
+        assert!(rendered.contains("# TYPE server_connections gauge"));
     }
 }
