@@ -1,8 +1,8 @@
-//! What the log lost.
+//! What the log and the statement events lost, and wrote.
 //!
-//! The log is written by a thread of its own behind a bounded queue, so a
-//! slow sink costs lines, never a client's time: this counter is how that
-//! loss is seen.
+//! Both are written by threads of their own behind bounded queues, so a
+//! slow sink costs lines or events, never a client's time: these counters
+//! are how that loss is seen.
 
 use super::pools::PoolMetric;
 use super::{Measurement, Metric};
@@ -24,11 +24,23 @@ impl Sinks {
             })
         };
 
-        vec![counter(
-            "log_lines_dropped_total",
-            "Log lines dropped because the log sink was behind.",
-            crate::log_sink::dropped(),
-        )]
+        vec![
+            counter(
+                "log_lines_dropped_total",
+                "Log lines dropped because the log sink was behind.",
+                crate::log_sink::dropped(),
+            ),
+            counter(
+                "query_events_total",
+                "Statement events written to query_events.",
+                crate::query_events::written(),
+            ),
+            counter(
+                "query_events_dropped_total",
+                "Statement events dropped because their writer was behind.",
+                crate::query_events::dropped(),
+            ),
+        ]
     }
 }
 
@@ -42,7 +54,11 @@ mod test {
             .iter()
             .map(|m| m.to_string())
             .collect::<String>();
-        for name in ["log_lines_dropped_total"] {
+        for name in [
+            "log_lines_dropped_total",
+            "query_events_total",
+            "query_events_dropped_total",
+        ] {
             assert!(
                 rendered.contains(&format!("# TYPE {name} counter")),
                 "{rendered}"

@@ -250,6 +250,11 @@ impl Shard {
         self.lb.pools_with_roles_and_bans()
     }
 
+    /// The role of one of this shard's pools, by its id.
+    pub(crate) fn role_of(&self, pool: u64) -> Option<Role> {
+        self.lb.role_of(pool)
+    }
+
     /// Shutdown every pool and maintenance task in this shard.
     pub(crate) fn shutdown(&self) {
         self.comms.shutdown.cancel();

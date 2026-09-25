@@ -162,6 +162,27 @@ impl Stream {
         matches!(self.inner, StreamInner::Tls(_))
     }
 
+    /// The TLS version the client negotiated, if it uses TLS.
+    pub(crate) fn tls_version(&self) -> Option<&'static str> {
+        use tokio_rustls::rustls::ProtocolVersion;
+
+        match &self.inner {
+            StreamInner::Tls(stream) => {
+                stream
+                    .get_ref()
+                    .get_ref()
+                    .1
+                    .protocol_version()
+                    .map(|version| match version {
+                        ProtocolVersion::TLSv1_3 => "TLSv1.3",
+                        ProtocolVersion::TLSv1_2 => "TLSv1.2",
+                        _ => "TLS",
+                    })
+            }
+            _ => None,
+        }
+    }
+
     /// `tls-server-end-point` binding for the certificate this connection
     /// presented, snapshotted at accept so a later TLS reload cannot
     /// change the hash mid-handshake.

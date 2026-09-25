@@ -19,6 +19,7 @@ pub(crate) mod context;
 pub(crate) mod deallocate;
 pub(crate) mod discard;
 pub(crate) mod end_transaction;
+pub(crate) mod events;
 pub(crate) mod fake;
 mod hold_cursor;
 pub(crate) mod hooks;
@@ -88,6 +89,8 @@ pub(crate) struct QueryEngine {
     request_error: bool,
     // What the client has of the answer to the current request.
     answer: Answer,
+    // Its statements, for query_events.
+    events: events::Events,
 }
 
 /// What the client has of the answer to the current request, for a read
@@ -133,6 +136,7 @@ impl QueryEngine {
             read_after_write: ReadAfterWrite::default(),
             request_error: false,
             answer: Answer::default(),
+            events: events::Events::default(),
         })
     }
 
@@ -165,6 +169,23 @@ impl QueryEngine {
         &mut self,
         context: &mut QueryEngineContext<'_>,
     ) -> Result<QueryEngineResult, Error> {
+        let result = self.handle_request(context).await;
+        match result {
+            Ok(_) => {
+                let done = !self.backend.has_more_messages()
+                    && !self.backend.in_copy_mode()
+                    && !self.streaming;
+                self.events.finish(done);
+            }
+            Err(ref err) => self.events.abort(err),
+        }
+        result
+    }
+
+    async fn handle_request(
+        &mut self,
+        context: &mut QueryEngineContext<'_>,
+    ) -> Result<QueryEngineResult, Error> {
         if let Some(result) = Self::check_extended_pipeline_rewrite(context.client_request)? {
             return Ok(result);
         }
@@ -174,6 +195,7 @@ impl QueryEngine {
         self.set_state(State::Active); // Client is active.
         self.request_error = false;
         self.answer = Answer::default();
+        self.events.begin(context);
 
         if self.in_extended_pipeline_error(context) {
             return Ok(QueryEngineResult::Done(context.transaction()));
@@ -189,9 +211,11 @@ impl QueryEngine {
         }
 
         // Rewrite statement if necessary.
+        let parse_started = std::time::Instant::now();
         let rewrite_result = match self.parse_and_rewrite(context).await {
             Ok(rewrite_result) => rewrite_result,
             Err(e) => {
+                self.events.parsed(context, parse_started.elapsed());
                 self.error_response(context, ErrorResponse::syntax(e.to_string()))
                     .await?;
                 return Ok(QueryEngineResult::Done(context.transaction()));
@@ -205,10 +229,15 @@ impl QueryEngine {
         }
 
         // Route transaction to the right servers.
-        if !self.route_query(context, rewrite_result.as_ref()).await? {
+        let routed = self.route_query(context, rewrite_result.as_ref()).await?;
+        self.events.parsed(context, parse_started.elapsed());
+        if !routed {
             self.update_stats(context);
             debug!("query has nowhere to go");
             return Ok(QueryEngineResult::Done(context.transaction()));
+        }
+        if let Some(route) = context.client_request.route.as_ref() {
+            self.events.routed(route);
         }
 
         self.hooks.before_execution(context)?;
@@ -316,7 +345,11 @@ impl QueryEngine {
             Command::Discard { target, extended } => {
                 self.discard(context, *target, *extended).await?
             }
-            Command::Split(queries) => return Ok(Self::build_simple_split(queries)),
+            Command::Split(queries) => {
+                // Its parts are the statements, each an event of its own.
+                self.events.split();
+                return Ok(Self::build_simple_split(queries));
+            }
         }
 
         // A released advisory lock may have been the client's last one.

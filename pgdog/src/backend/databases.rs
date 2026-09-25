@@ -100,6 +100,7 @@ pub(crate) fn reconnect() -> Result<(), Error> {
 pub(crate) fn reload_from_existing() -> Result<(), Error> {
     let _lock = lock();
     let config = config();
+    crate::query_events::configure(&config.config.general);
     let databases = from_config(&config);
     replace_databases(databases, true)?;
     Ok(())
@@ -108,6 +109,7 @@ pub(crate) fn reload_from_existing() -> Result<(), Error> {
 /// Initialize the databases for the first time.
 pub(crate) fn init() -> Result<(), Error> {
     let config = config();
+    crate::query_events::configure(&config.config.general);
     replace_databases(from_config(&config), false)?;
 
     // Resize query cache
@@ -174,6 +176,7 @@ pub(crate) fn reload(force: bool) -> Result<(), Error> {
     }
 
     let new_config = set(new_config)?;
+    crate::query_events::configure(&new_config.config.general);
     let databases = from_config(&new_config);
 
     // Terminate after checking config for validity.

@@ -28,6 +28,7 @@ impl QueryEngine {
     ) -> Result<bool, Error> {
         if self.backend.connected() {
             self.debug_connected(context, true);
+            self.events.connected(None);
             return Ok(true);
         }
 
@@ -85,6 +86,7 @@ impl QueryEngine {
 
                     self.begin_stmt = None;
                     linked?;
+                    self.events.connected(Some(self.stats.wait_time));
 
                     break true;
                 }
@@ -103,6 +105,7 @@ impl QueryEngine {
                         let error = ErrorResponse::from_err(&err);
 
                         self.hooks.on_engine_error(context, &error)?;
+                        self.events.door_error(&error);
 
                         let bytes_sent = context
                             .stream

@@ -127,6 +127,7 @@ impl QueryEngine {
                     if retry_read && !self.answer.committed && err.is_retryable() =>
                 {
                     read_retries += 1;
+                    self.events.retried();
                     let replica = self.backend.ban_failed_replica();
                     warn!(
                         "read failed on replica {}, before its answer: {}; running it again on another server [{:?}]",
@@ -180,6 +181,14 @@ impl QueryEngine {
         rewrite_result: Option<RewriteResult>,
         mut down: Option<tokio::sync::watch::Receiver<u64>>,
     ) -> Result<(), Error> {
+        let pinned = self.advisory_locks.locked()
+            || !self.temp_tables.is_empty()
+            || !self.hold_cursors.is_empty()
+            || self.manual_lock
+            || self.backend.session_mode();
+        self.events
+            .sending(&self.backend, pinned, context.in_transaction());
+
         match rewrite_result {
             Some(RewriteResult::InsertSplit(requests)) => {
                 Box::pin(multi_step::InsertMulti::from_engine(self, requests).execute(context))
@@ -388,6 +397,8 @@ impl QueryEngine {
             && !context.pipeline.is_done()
             && context.pipeline.is_simple()
             && !context.in_error(); // On error, pipeline is done executing.
+        self.events.server_message(&message, !drop_message);
+
         if !drop_message {
             trace!("{:#?} >>> {:?}", message, context.stream.peer_addr());
 
@@ -623,6 +634,7 @@ impl QueryEngine {
         }
 
         self.hooks.on_engine_error(context, &error)?;
+        self.events.door_error(&error);
 
         let bytes_sent = context
             .stream

@@ -497,6 +497,20 @@ impl Connection {
         self.replica_target().map(|(_, pool)| pool.down_watch())
     }
 
+    /// The server this client is on and its role (a direct binding only).
+    pub(crate) fn serving(&self) -> Option<(&Address, crate::config::Role)> {
+        let Binding::Direct(guard, shard) = &self.binding else {
+            return None;
+        };
+        let role = self
+            .cluster
+            .as_ref()?
+            .shards()
+            .get(*shard)?
+            .role_of(guard.pool.id())?;
+        Some((guard.pool.addr(), role))
+    }
+
     /// The load balancer target of the replica this client is on.
     fn replica_target(&self) -> Option<(super::lb::ban::Ban, super::Pool)> {
         let Binding::Direct(guard, shard) = &self.binding else {

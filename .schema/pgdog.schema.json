@@ -91,6 +91,8 @@
         "primary_functions": [],
         "pub_sub_channel_size": 0,
         "query_cache_limit": 1000,
+        "query_events": null,
+        "query_events_max_bytes": 268435456,
         "query_log": null,
         "query_log_stdout": false,
         "query_parser": "auto",
@@ -1140,6 +1142,21 @@
           "type": "integer",
           "format": "uint",
           "default": 1000,
+          "minimum": 0
+        },
+        "query_events": {
+          "description": "Write every statement clients send as one JSON object a line to this\nfile: when it arrived, the client, user and database, where it was\nrouted and why, the server that answered, its time waiting for a\nconnection and on the server, rows, bytes, the outcome and SQLSTATE,\nand a fingerprint of its text (never the text or its parameters).\nA thread of its own writes the file behind a bounded queue: the query\npath never waits for it; a full queue drops the event and counts it\n(`query_events_dropped_total`). Rotated at `query_events_max_bytes`\nto `.1` ... `.7`.\n\n_Default:_ none (off)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "query_events_max_bytes": {
+          "description": "Rotate `query_events` past this size; seven rotated files are kept.\n\n_Default:_ `268435456` (256 MiB)",
+          "type": "integer",
+          "format": "uint64",
+          "default": 268435456,
           "minimum": 0
         },
         "query_log": {

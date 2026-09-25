@@ -50,6 +50,7 @@ mod healthcheck;
 mod log_sink;
 mod net;
 mod plugin;
+mod query_events;
 mod sighup;
 mod state;
 mod stats;

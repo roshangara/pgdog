@@ -393,6 +393,14 @@ impl LoadBalancer {
     }
 
     /// Collect all connection pools used for read queries.
+    /// The role of one of this shard's pools, by its id.
+    pub(crate) fn role_of(&self, pool: u64) -> Option<Role> {
+        self.targets
+            .iter()
+            .find(|target| target.pool.id() == pool)
+            .map(|target| target.role())
+    }
+
     pub(crate) fn pools_with_roles_and_bans(&self) -> Vec<(Role, Ban, Pool)> {
         let result: Vec<_> = self
             .targets

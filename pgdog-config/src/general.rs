@@ -346,6 +346,26 @@ pub struct General {
     #[serde(default)]
     pub query_log: Option<PathBuf>,
 
+    /// Write every statement clients send as one JSON object a line to this
+    /// file: when it arrived, the client, user and database, where it was
+    /// routed and why, the server that answered, its time waiting for a
+    /// connection and on the server, rows, bytes, the outcome and SQLSTATE,
+    /// and a fingerprint of its text (never the text or its parameters).
+    /// A thread of its own writes the file behind a bounded queue: the query
+    /// path never waits for it; a full queue drops the event and counts it
+    /// (`query_events_dropped_total`). Rotated at `query_events_max_bytes`
+    /// to `.1` ... `.7`.
+    ///
+    /// _Default:_ none (off)
+    #[serde(default)]
+    pub query_events: Option<PathBuf>,
+
+    /// Rotate `query_events` past this size; seven rotated files are kept.
+    ///
+    /// _Default:_ `268435456` (256 MiB)
+    #[serde(default = "General::query_events_max_bytes")]
+    pub query_events_max_bytes: u64,
+
     /// Log queries to stdout. Format: `query [database: db, user: user]`
     #[serde(default = "General::query_log_stdout")]
     pub query_log_stdout: bool,
@@ -999,6 +1019,8 @@ impl Default for General {
             broadcast_address: Self::broadcast_address(),
             broadcast_port: Self::broadcast_port(),
             query_log: Self::query_log(),
+            query_events: None,
+            query_events_max_bytes: Self::query_events_max_bytes(),
             query_log_stdout: Self::query_log_stdout(),
             log_min_duration_parse: Self::default_log_min_duration_parse(),
             log_query_sample_length: Self::log_query_sample_length(),
@@ -1456,6 +1478,10 @@ impl General {
 
     fn tls_client_ca_certificate() -> Option<PathBuf> {
         Self::env_option_string("PGDOG_TLS_CLIENT_CA_CERTIFICATE").map(PathBuf::from)
+    }
+
+    fn query_events_max_bytes() -> u64 {
+        256 * 1024 * 1024
     }
 
     fn query_log() -> Option<PathBuf> {
