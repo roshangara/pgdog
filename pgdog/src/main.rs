@@ -47,6 +47,7 @@ mod cli;
 mod config;
 mod frontend;
 mod healthcheck;
+mod log_sink;
 mod net;
 mod plugin;
 mod sighup;
@@ -99,14 +100,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(err) => {
             if matches!(command.as_ref(), Some(Commands::Configcheck)) {
                 error!("{}", err);
+                log_sink::flush();
                 exit(1);
             }
+            log_sink::flush();
             return Err(Box::new(err));
         }
     };
 
     if matches!(command.as_ref(), Some(Commands::Configcheck)) {
         info!("✅ config valid");
+        log_sink::flush();
         exit(0);
     }
 
@@ -143,7 +147,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.config.general.unique_id_function
     );
 
-    runtime.block_on(async move { pgdog(args.command).await })?;
+    let result = runtime.block_on(async move { pgdog(args.command).await });
+    log_sink::flush();
+    result?;
 
     Ok(())
 }
@@ -309,6 +315,7 @@ fn install_sigterm_handler() {
         tokio::spawn(async move {
             sigterm.recv().await;
             info!("🐕 PgDog is shutting down immediately [SIGTERM]");
+            log_sink::flush();
             exit(0);
         });
     }
@@ -507,9 +514,11 @@ fn init_logger(general: Option<&General>) {
         .map(|general| general.log_format)
         .unwrap_or_default();
 
+    // Lines go to stderr through a bounded queue and a thread of their own:
+    // a stalled log pipe drops and counts lines, it never stops serving.
     let format = fmt::layer()
         .with_ansi(std::io::stderr().is_terminal())
-        .with_writer(std::io::stderr)
+        .with_writer(log_sink::LogSink::stderr())
         .with_file(false);
     #[cfg(not(debug_assertions))]
     let format = format.with_target(false);

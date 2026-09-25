@@ -1,6 +1,7 @@
 //! Statistics.
 pub(crate) mod clients;
 pub(crate) mod clients_locked;
+pub(crate) mod connections;
 pub(crate) mod http_server;
 pub(crate) mod lookup;
 pub(crate) mod mirror_stats;
@@ -14,11 +15,13 @@ pub(crate) mod logger;
 pub(crate) mod memory;
 pub(crate) mod query_cache;
 pub(crate) mod read_after_write;
+pub(crate) mod sinks;
 pub(crate) mod stale_reads;
 pub(crate) mod two_pc;
 
 pub(crate) use clients::Clients;
 pub(crate) use clients_locked::ClientsLocked;
+pub(crate) use connections::Connections;
 pub(crate) use listeners::Listeners;
 pub(crate) use logger::Logger as StatsLogger;
 pub(crate) use lookup::LookupMetrics;
@@ -26,5 +29,6 @@ pub(crate) use mirror_stats::MirrorStatsMetrics;
 pub(crate) use pools::Pools;
 pub(crate) use query_cache::QueryCache;
 pub(crate) use read_after_write::ReadAfterWrite;
+pub(crate) use sinks::Sinks;
 pub(crate) use stale_reads::StaleReads;
 pub(crate) use two_pc::TwoPc;

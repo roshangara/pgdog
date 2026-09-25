@@ -52,6 +52,7 @@ use crate::backend::pool::inner::ShouldCreate;
 use crate::backend::pool::token_cache::TokenCache;
 use crate::backend::{ConnectReason, DisconnectReason, Server};
 use crate::config::ServerAuth;
+use crate::log_sink::CONNECTIONS;
 use crate::tasks;
 
 use crate::util::{safe_interval, safe_sleep, safe_timeout};
@@ -155,7 +156,7 @@ impl Monitor {
                     }
 
                     if let ShouldCreate::Yes { reason, .. } = should_create {
-                        info!("new connection requested: {} [{}]", should_create, self.pool.addr());
+                        info!(target: CONNECTIONS, "new connection requested: {} [{}]", should_create, self.pool.addr());
                         let ok = match self.replenish(reason).await {
                             Ok(ok) => ok,
                             Err(err) => {
@@ -385,7 +386,7 @@ impl Monitor {
             .await?;
         } else {
             // Create a new one and close it.
-            info!("creating new healthcheck connection [{}]", pool.addr());
+            info!(target: CONNECTIONS, "creating new healthcheck connection [{}]", pool.addr());
 
             let mut server = Self::create_connection(pool, ConnectReason::Healthcheck)
                 .await

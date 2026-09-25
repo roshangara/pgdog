@@ -26,6 +26,7 @@ use crate::backend::{
 use crate::config::convert::user_from_params;
 use crate::config::{self, AuthType, ConfigAndUsers, config};
 use crate::frontend::ClientComms;
+use crate::log_sink::CONNECTIONS;
 use crate::net::messages::{
     Authentication, BackendKeyData, ErrorResponse, FromBytes, FrontendPid, Message, Password,
     Protocol, ProtocolVersion, ReadyForQuery, ToBytes, scram_challenge,
@@ -396,9 +397,11 @@ impl Client {
         stream.send(&key).await?;
         stream.send_flush(&ReadyForQuery::idle()).await?;
         comms.connect(key.clone(), addr, &params);
+        crate::stats::connections::client_connected();
 
         if config.config.general.log_connections {
             info!(
+                target: CONNECTIONS,
                 r#"client "{}" connected to database "{}" [{}, auth: {}] {}"#,
                 user,
                 database,
@@ -490,6 +493,7 @@ impl Client {
                 if config().config.general.log_disconnections {
                     let (user, database) = user_database_from_params(&self.params);
                     info!(
+                        target: CONNECTIONS,
                         r#"client "{}" disconnected from database "{}" [{}]"#,
                         user, database, self.addr
                     )
@@ -503,6 +507,7 @@ impl Client {
                 if config().config.general.log_disconnections {
                     let (user, database) = user_database_from_params(&self.params);
                     error!(
+                        target: CONNECTIONS,
                         r#"client "{}" disconnected from database "{}" with error [{}]: {}"#,
                         user, database, self.addr, err
                     )

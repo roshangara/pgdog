@@ -42,7 +42,7 @@ use crate::{
         tls::UpstreamTlsSettings,
     },
 };
-use crate::{net::tweak, state::State};
+use crate::{log_sink::CONNECTIONS, net::tweak, state::State};
 
 /// A request executed on a server connection: simple-protocol queries,
 /// or an extended-protocol message batch ending in a Sync.
@@ -405,7 +405,9 @@ impl Server {
         let key = key_data.unwrap_or_else(BackendKeyData::random_legacy);
         let params: Parameters = params.into();
 
+        crate::stats::connections::server_opened(connect_reason);
         info!(
+            target: CONNECTIONS,
             "new server connection: auth={}, source={}, reason={} [{}] {}",
             auth_type,
             auth_secret.source,
@@ -1322,10 +1324,13 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stats().disconnect();
         if let Some(mut stream) = self.stream.take() {
+            let reason = self.disconnect_reason.take().unwrap_or_default();
+            crate::stats::connections::server_closed(reason);
             info!(
+                target: CONNECTIONS,
                 "closing server connection: state={}, reason={} [{}]",
                 self.stats.get_state(),
-                self.disconnect_reason.take().unwrap_or_default(),
+                reason,
                 self.addr,
             );
 
