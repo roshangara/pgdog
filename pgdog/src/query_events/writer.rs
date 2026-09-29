@@ -50,8 +50,11 @@ pub(super) struct Writer {
     line: Vec<u8>,
     /// Fingerprint and command of the parser's shared texts, by the text's
     /// address; the entry holds the text, so the address can't be reused.
-    fingerprints: HashMap<usize, (Arc<str>, u64, Option<(usize, usize)>)>,
+    fingerprints: HashMap<usize, Fingerprinted>,
 }
+
+/// A parser's shared text, its fingerprint, and where its command is in it.
+type Fingerprinted = (Arc<str>, u64, Option<(usize, usize)>);
 
 impl Writer {
     pub(super) fn new(instance: &str) -> Self {
