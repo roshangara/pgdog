@@ -50,6 +50,12 @@ impl ErrorResponse {
             || matches!(self.code.as_str(), "3D000" | "42501" | "42704" | "53300")
     }
 
+    /// A refusal that stays until someone changes the role or the database:
+    /// all of [`Self::refuses_login`] but too many connections.
+    pub(crate) fn refuses_login_for_good(&self) -> bool {
+        self.refuses_login() && self.code != "53300"
+    }
+
     /// Authentication error.
     pub(crate) fn auth(user: &str, database: &str) -> ErrorResponse {
         ErrorResponse {

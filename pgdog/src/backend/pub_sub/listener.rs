@@ -12,6 +12,7 @@ use std::{
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
+use rand::Rng;
 use tokio::{
     select,
     sync::{Notify, broadcast, mpsc},
@@ -24,10 +25,9 @@ use crate::log_sink::CONNECTIONS;
 use crate::util::{safe_interval, safe_sleep};
 use crate::{
     backend::{self, ConnectReason, DisconnectReason, Pool, databases::User, pool::Error},
-    config::config,
     net::{
-        FromBytes, FrontendPid, NotificationResponse, Parameter, Parameters, Protocol,
-        ProtocolMessage, Query, ToBytes,
+        ErrorResponse, FromBytes, FrontendPid, NotificationResponse, Parameter, Parameters,
+        Protocol, ProtocolMessage, Query, ToBytes,
     },
     tasks,
 };
@@ -91,6 +91,11 @@ pub(crate) struct ChannelKey {
 }
 
 type Channels = Arc<Mutex<HashMap<PoolKey, HashMap<String, Channel>>>>;
+
+/// The first delay before the listener connects again after an error.
+const RECONNECT_FIRST: Duration = Duration::from_millis(100);
+/// The longest delay before the listener connects again after an error.
+const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
 static CHANNELS: Lazy<Channels> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
@@ -261,8 +266,15 @@ impl PubSubListener {
             // and closed after idle_timeout with no channel listened to: a
             // tenant that never uses LISTEN costs no connection, one that
             // stopped costs none after idle_timeout. After an error, the
-            // channels clients still listen on are listened on again at once.
+            // channels clients still listen on are listened on again, after
+            // a delay that doubles from 100 ms to 30 s: a server that fails,
+            // or refuses the login for a while (too many connections), is
+            // not asked again and again at once. A login refused for good
+            // (the role or the database dropped, the password changed) ends
+            // this pool's channels: nothing is asked again until a client
+            // listens or notifies anew.
             let mut first = None;
+            let mut backoff = Backoff::new();
             loop {
                 if first.is_none() && !has_listeners(&channels, &pool_key) {
                     first = select! {
@@ -274,20 +286,44 @@ impl PubSubListener {
                     };
                 }
 
+                let mut connected = false;
                 let result = select! {
                     _ = comms.shutdown.cancelled() => break,
-                    result = Self::run(id, &pool, &pool_key, &mut rx, channels.clone(), first.take()) => result,
+                    result = Self::run(id, &pool, &pool_key, &mut rx, channels.clone(), first.take(), &mut connected) => result,
                 };
+
+                if connected {
+                    backoff.reset();
+                }
 
                 match result {
                     Ok(Ended::Idle) => continue,
                     Ok(Ended::Closed) => break,
                     Err(err) => {
-                        error!("pub/sub error: {} [{}]", err, pool.addr());
-                        // Don't reconnect for another connect attempt delay
-                        // to avoid connection storms during incidents.
+                        if let Some(response) = refused_for_good(&err) {
+                            let dropped = drop_channels(&channels, &pool_key);
+                            // What clients asked before the refusal gets the
+                            // same answer; a channel listened on from now on
+                            // is in the map again, and connects.
+                            while rx.try_recv().is_ok() {}
+                            error!(
+                                "pub/sub stopped, the server refused the login: {}; {} channels dropped until a client listens again [{}]",
+                                response,
+                                dropped,
+                                pool.addr()
+                            );
+                            continue;
+                        }
+
+                        let delay = backoff.next();
+                        error!(
+                            "pub/sub error: {}; connecting again in {} ms [{}]",
+                            err,
+                            delay.as_millis(),
+                            pool.addr()
+                        );
                         select! {
-                            _ = safe_sleep(Duration::from_millis(config().config.general.connect_attempt_delay)) => {}
+                            _ = safe_sleep(delay) => {}
                             _ = comms.shutdown.cancelled() => break,
                         }
                     }
@@ -354,7 +390,8 @@ impl PubSubListener {
 
     // Run the listener task: until the connection fails, the listener is
     // shut down (`Ended::Closed`) or nothing needed it for idle_timeout
-    // (`Ended::Idle`).
+    // (`Ended::Idle`). `connected` is set once the server accepted the
+    // login.
     async fn run(
         id: FrontendPid,
         pool: &Pool,
@@ -362,11 +399,13 @@ impl PubSubListener {
         rx: &mut mpsc::Receiver<Request>,
         channels: Channels,
         first: Option<Request>,
+        connected: &mut bool,
     ) -> Result<Ended, backend::Error> {
         info!(target: CONNECTIONS, "pub/sub started [{}]", pool.addr());
 
         let mut server = pool.standalone(ConnectReason::PubSub).await?;
         let _connected = Connected::new(pool);
+        *connected = true;
 
         server
             .link_client(
@@ -457,6 +496,56 @@ impl PubSubListener {
 
         Ok(Ended::Idle)
     }
+}
+
+/// When the listener connects again after an error: [`RECONNECT_FIRST`],
+/// doubling to [`RECONNECT_MAX`], each with jitter (half of it to all of it),
+/// so the listeners of a server that failed don't all come back at once.
+/// Back to the first once a login succeeds.
+struct Backoff {
+    next: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Self {
+            next: RECONNECT_FIRST,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next = RECONNECT_FIRST;
+    }
+
+    /// The delay before the next attempt.
+    fn next(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = (self.next * 2).min(RECONNECT_MAX);
+        let half = delay / 2;
+        half + half.mul_f64(rand::rng().random_range(0.0..=1.0))
+    }
+}
+
+/// The server's answer, when it refused the listener's login for good
+/// ([`ErrorResponse::refuses_login_for_good`]): connecting again gets the
+/// same answer until someone changes the role or the database.
+fn refused_for_good(err: &backend::Error) -> Option<&ErrorResponse> {
+    match err {
+        backend::Error::Pool(err) => err
+            .refusal()
+            .filter(|response| response.refuses_login_for_good()),
+        _ => None,
+    }
+}
+
+/// Drop every channel of this pool: clients listening on one see it
+/// closed. Returns how many there were.
+fn drop_channels(channels: &Channels, pool_key: &PoolKey) -> usize {
+    channels
+        .lock()
+        .remove(pool_key)
+        .map(|channels| channels.len())
+        .unwrap_or_default()
 }
 
 /// Why the listener's connection ended.
@@ -856,6 +945,243 @@ mod test {
 
         listener.shutdown();
         wait_for(0).await;
+        pool.shutdown();
+    }
+
+    /// Listener connections held now, all servers.
+    fn held() -> usize {
+        connections().into_iter().map(|(_, n)| n).sum()
+    }
+
+    async fn wait_for_held(n: usize, within: Duration) {
+        let deadline = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < deadline {
+            if held() == n {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "expected {n} listener connections within {within:?}, got {}",
+            held()
+        );
+    }
+
+    /// A server on a port of its own that counts the logins it is sent and
+    /// answers each with `reply`, or with no reply closes the connection at
+    /// once (a server that fails).
+    async fn fake_server(
+        reply: Option<ErrorResponse>,
+    ) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = socket.local_addr().unwrap().port();
+        let logins = Arc::new(AtomicUsize::new(0));
+        let counted = logins.clone();
+
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = socket.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let Some(reply) = reply.clone() else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    // An SSLRequest is answered no; then the startup message.
+                    loop {
+                        let Ok(len) = stream.read_i32().await else {
+                            return;
+                        };
+                        let mut body = vec![0u8; (len as usize).saturating_sub(4)];
+                        if stream.read_exact(&mut body).await.is_err() {
+                            return;
+                        }
+                        if body[..] == 80877103i32.to_be_bytes() {
+                            if stream.write_all(b"N").await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                    let _ = stream.write_all(&reply.to_bytes()).await;
+                });
+            }
+        });
+
+        (port, logins)
+    }
+
+    /// A pool of the fake server, not launched: the listener is the only
+    /// one to connect.
+    fn fake_pool(port: u16) -> Pool {
+        use crate::backend::pool::{Address, Config, PoolConfig};
+
+        Pool::new(&PoolConfig {
+            address: Address {
+                port,
+                ..Address::new_test()
+            },
+            config: Config {
+                min: 0,
+                connect_timeout: Duration::from_millis(500),
+                idle_timeout: Duration::from_millis(300),
+                ..Config::default()
+            },
+        })
+    }
+
+    fn refusal(code: &str, message: &str) -> ErrorResponse {
+        ErrorResponse {
+            severity: "FATAL".into(),
+            code: code.into(),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    /// A server that fails is asked again after a delay that doubles from
+    /// 100 ms, not at once: ganjban.7 waited connect_attempt_delay, 0 by
+    /// default, and a door made ~94 logins a second for one listener.
+    #[tokio::test]
+    async fn test_a_failing_server_is_asked_again_with_backoff() {
+        use std::sync::atomic::Ordering;
+
+        crate::logger();
+        let (port, logins) = fake_server(None).await;
+        let pool = fake_pool(port);
+
+        let listener = PubSubListener::new(&pool, &test_user("pgdog", "pgdog"), 0);
+        listener.launch();
+        let _subscription = listener.listen("backoff").await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let attempts = logins.load(Ordering::SeqCst);
+        // Delays of 50-100, 100-200, 200-400, 400-800 ms: 4 or 5 logins.
+        assert!(
+            (3..=6).contains(&attempts),
+            "{attempts} logins in 1.5 s: the listener must back off"
+        );
+
+        listener.shutdown();
+    }
+
+    /// Too many connections is a refusal for a while: the listener backs off
+    /// and asks again, and doesn't give up the channels.
+    #[tokio::test]
+    async fn test_too_many_connections_is_asked_again_with_backoff() {
+        use std::sync::atomic::Ordering;
+
+        crate::logger();
+        let (port, logins) = fake_server(Some(refusal(
+            "53300",
+            "too many connections for role \"pgdog\"",
+        )))
+        .await;
+        let pool = fake_pool(port);
+
+        let listener = PubSubListener::new(&pool, &test_user("pgdog", "pgdog"), 0);
+        listener.launch();
+        let _subscription = listener.listen("limited").await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let attempts = logins.load(Ordering::SeqCst);
+        assert!(
+            (3..=6).contains(&attempts),
+            "{attempts} logins in 1.5 s: the listener must back off and go on"
+        );
+        assert!(has_listeners(&listener.channels, &listener.pool_key));
+
+        listener.shutdown();
+    }
+
+    /// A login refused for good (the role dropped, the password changed, the
+    /// database dropped) stops the listener: one login, its channels dropped
+    /// (clients listening see them closed), and no other until a client
+    /// listens again, which starts over with one login.
+    #[tokio::test]
+    async fn test_a_login_refused_for_good_stops_the_listener() {
+        use std::sync::atomic::Ordering;
+
+        crate::logger();
+        for (code, message) in [
+            ("28P01", "password authentication failed for user \"pgdog\""),
+            ("28000", "role \"pgdog\" does not exist"),
+            ("3D000", "database \"pgdog\" does not exist"),
+            ("42704", "role \"pgdog\" does not exist"),
+        ] {
+            let (port, logins) = fake_server(Some(refusal(code, message))).await;
+            let pool = fake_pool(port);
+
+            let listener = PubSubListener::new(&pool, &test_user("pgdog", "pgdog"), 0);
+            listener.launch();
+            let mut subscription = listener.listen("dropped").await.unwrap();
+
+            let closed = tokio::time::timeout(Duration::from_secs(1), subscription.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{code}: the channel must be dropped"));
+            assert!(
+                matches!(closed, Err(broadcast::error::RecvError::Closed)),
+                "{code}: {closed:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert_eq!(
+                logins.load(Ordering::SeqCst),
+                1,
+                "{code}: one login, no more"
+            );
+            assert!(!has_listeners(&listener.channels, &listener.pool_key));
+
+            // Listening again starts over.
+            let _again = listener.listen("dropped").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            assert_eq!(
+                logins.load(Ordering::SeqCst),
+                2,
+                "{code}: a new LISTEN, one login"
+            );
+
+            listener.shutdown();
+        }
+    }
+
+    /// A client that goes away without UNLISTEN (its connection dropped)
+    /// listens no more: the listener leaves the server within the idle rule
+    /// (idle_timeout with nobody listening). ganjban.7 held it until the
+    /// server went away.
+    #[tokio::test]
+    async fn test_a_client_gone_without_unlisten_releases_the_listener() {
+        use crate::backend::pool::{Address, Config, PoolConfig};
+        use crate::backend::pub_sub::PubSubClient;
+
+        crate::logger();
+        let pool = Pool::new(&PoolConfig {
+            address: Address::new_test(),
+            config: Config {
+                min: 0,
+                idle_timeout: Duration::from_millis(300),
+                ..Config::default()
+            },
+        });
+        pool.launch();
+
+        let listener = PubSubListener::new(&pool, &test_user("pgdog", "pgdog"), 0);
+        listener.launch();
+
+        let mut client = PubSubClient::new();
+        client.listen("gone_client", listener.listen("gone_client").await.unwrap());
+        wait_for_held(1, Duration::from_secs(2)).await;
+
+        // Still listened to: it stays past idle_timeout.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert_eq!(held(), 1);
+
+        // The client disconnects, no UNLISTEN.
+        drop(client);
+        wait_for_held(0, Duration::from_millis(1500)).await;
+
+        listener.shutdown();
         pool.shutdown();
     }
 }

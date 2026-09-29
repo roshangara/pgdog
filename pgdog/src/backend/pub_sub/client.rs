@@ -32,7 +32,17 @@ impl PubSubClient {
     }
 
     /// Listen on a channel.
+    ///
+    /// The channel's listener count holds while this client listens: until
+    /// UNLISTEN, or the client goes away, with or without saying so (this
+    /// client dropped). A channel it already listens on is not listened on
+    /// twice (LISTEN of a channel listened on does nothing in PostgreSQL):
+    /// the second listener would outlive the client's UNLISTEN.
     pub(crate) fn listen(&mut self, channel: &str, mut rx: Listener) {
+        if self.unlisten.contains_key(channel) {
+            return;
+        }
+
         let tx = self.tx.clone();
 
         let unlisten = Arc::new(Notify::new());
@@ -42,6 +52,11 @@ impl PubSubClient {
             loop {
                 select! {
                     _ = unlisten.notified() => {
+                        return;
+                    }
+
+                    // The client is gone.
+                    _ = tx.closed() => {
                         return;
                     }
 
@@ -79,6 +94,13 @@ impl PubSubClient {
         for (_, notify) in self.unlisten.drain() {
             notify.notify_one();
         }
+    }
+}
+
+impl Drop for PubSubClient {
+    /// A client that disconnects listens no more, UNLISTEN or not.
+    fn drop(&mut self) {
+        self.unlisten_all();
     }
 }
 
@@ -193,5 +215,55 @@ mod test {
         assert!(updates.send(notification("updates", "payload")).is_err());
         assert_snapshot(events.stats(), 0, 0, 0);
         assert_snapshot(updates.stats(), 0, 0, 0);
+    }
+
+    /// A client that disconnects without UNLISTEN (the client and its
+    /// connection dropped) listens no more: the count the server listener
+    /// keeps its connection for goes back to 0.
+    #[tokio::test]
+    async fn dropping_the_client_releases_its_channels() {
+        let events = TestChannel::new();
+        let updates = TestChannel::new();
+        let mut client = PubSubClient::new();
+
+        client.listen("events", events.listener());
+        client.listen("updates", updates.listener());
+        wait_for_listener_count(&events, 1).await;
+        wait_for_listener_count(&updates, 1).await;
+
+        drop(client);
+        wait_for_listener_count(&events, 0).await;
+        wait_for_listener_count(&updates, 0).await;
+    }
+
+    /// The receiving end of a client going away (its connection dropped
+    /// while the client object lives on elsewhere) ends the forwarding too.
+    #[tokio::test]
+    async fn a_closed_client_receiver_releases_the_channel() {
+        let events = TestChannel::new();
+        let mut client = PubSubClient::new();
+
+        client.listen("events", events.listener());
+        wait_for_listener_count(&events, 1).await;
+
+        client.rx.close();
+        wait_for_listener_count(&events, 0).await;
+        std::mem::forget(client);
+    }
+
+    /// LISTEN of a channel the client listens on already does nothing, as
+    /// in PostgreSQL; UNLISTEN then ends it. A second forwarding task would
+    /// have kept the channel listened on after UNLISTEN.
+    #[tokio::test]
+    async fn listening_twice_then_unlisten_releases_the_channel() {
+        let events = TestChannel::new();
+        let mut client = PubSubClient::new();
+
+        client.listen("events", events.listener());
+        client.listen("events", events.listener());
+        wait_for_listener_count(&events, 1).await;
+
+        client.unlisten("events");
+        wait_for_listener_count(&events, 0).await;
     }
 }

@@ -86,6 +86,14 @@ impl Error {
                 | Self::Refused(_)
         )
     }
+
+    /// The server's refusal of a login, if this is one.
+    pub(crate) fn refusal(&self) -> Option<&ErrorResponse> {
+        match self {
+            Self::Refused(response) => Some(response),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
