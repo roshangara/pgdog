@@ -413,7 +413,15 @@ impl LoadBalancer {
                     Ordering::Release,
                 );
                 *to.pool.inner().lsn_stats.write() = from.pool.lsn_stats();
-                to.ban.carry_manual_ban(&from.ban);
+                // A server found down stays out of reads through the reload:
+                // the new pool would otherwise be healthy and unbanned until
+                // the next ban check, and the reads in that window go to it
+                // and fail ("all replicas down").
+                let down = !from.health().healthy();
+                to.ban.carry_ban(&from.ban, down);
+                if down {
+                    to.health().toggle(false);
+                }
             }
         }
         destination.require_healthcheck_for_new_targets(&self.targets);

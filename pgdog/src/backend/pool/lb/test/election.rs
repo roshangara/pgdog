@@ -461,3 +461,39 @@ async fn test_a_new_clients_parameters_come_from_a_server_that_answers() {
         "the next server answers at once, took {elapsed:?}"
     );
 }
+
+/// A reload keeps a server found down out of reads: its ban and its health
+/// move to the new pool. Before, the new pool was healthy and unbanned until
+/// the next ban check, and a read in that window went to it alone and failed
+/// with "all replicas down" (a readers address with nothing behind it,
+/// after every new passthrough user's first login).
+#[tokio::test]
+async fn test_a_reload_keeps_a_down_replica_out_of_reads() {
+    crate::logger();
+    let old = auto_lb(&[("127.0.0.1", 1), ("127.0.0.1", 5432)]);
+    old.launch();
+    stats(&old.targets[0], true, 7, 500, FRESH);
+    stats(&old.targets[1], false, 7, 500, FRESH);
+    old.redetect_roles();
+    old.targets[0].pool.inner().health.toggle(false);
+    old.targets[0]
+        .ban
+        .ban(Error::PoolUnhealthy, Duration::from_secs(10));
+
+    let new = auto_lb(&[("127.0.0.1", 1), ("127.0.0.1", 5432)]);
+    old.move_conns_to(&new).unwrap();
+    new.launch();
+
+    assert!(new.targets[0].ban.banned(), "the ban moves with the reload");
+    assert!(!new.targets[0].health().healthy());
+
+    let read = new
+        .get(&Request::new(FrontendPid::new(), true, false))
+        .await
+        .expect("the read goes to the primary");
+    assert_eq!(read.pool.addr().port, 5432);
+    drop(read);
+
+    old.shutdown();
+    new.shutdown();
+}

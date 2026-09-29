@@ -42,14 +42,17 @@ impl Ban {
         self.inner.read().ban.is_some()
     }
 
-    /// Carry manual ban over to the new ban state.
-    pub(crate) fn carry_manual_ban(&self, from: &Self) {
+    /// Carry a ban over to the new ban state on a reload: a manual ban
+    /// always, any other while the server is `down` (its pool unhealthy):
+    /// the reload makes new pools of the same servers, and a server found
+    /// down is still down. The ban keeps its start and its timeout.
+    pub(crate) fn carry_ban(&self, from: &Self, down: bool) {
         let ban = from
             .inner
             .read()
             .ban
             .as_ref()
-            .filter(|ban| ban.error == Error::ManualBan)
+            .filter(|ban| down || ban.error == Error::ManualBan)
             .cloned();
         if let Some(ban) = ban {
             self.inner.write().ban = Some(ban);
