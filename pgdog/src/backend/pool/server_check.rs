@@ -328,13 +328,13 @@ impl ServerCheck {
 
 /// The server refused the login for its user or database, which says the
 /// server answers: authentication (class 28), a database that doesn't
-/// exist (3D000), no right to connect (42501).
+/// exist (3D000), no right to connect (42501), a role that doesn't exist
+/// (42704), too many connections for the role or database (53300; a tenant
+/// at its connection limit is no server failure).
 fn refused_login(err: &BackendError) -> bool {
     match err {
         BackendError::Auth(_) => true,
-        BackendError::ConnectionError(response) => {
-            response.code.starts_with("28") || response.code == "3D000" || response.code == "42501"
-        }
+        BackendError::ConnectionError(response) => response.refuses_login(),
         _ => false,
     }
 }

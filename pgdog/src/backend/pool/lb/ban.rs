@@ -58,7 +58,7 @@ impl Ban {
 
     /// Get ban error, if any.
     pub(crate) fn error(&self) -> Option<Error> {
-        self.inner.read().ban.as_ref().map(|b| b.error)
+        self.inner.read().ban.as_ref().map(|b| b.error.clone())
     }
 
     /// Time remaining before the ban expires.
@@ -107,6 +107,7 @@ impl Ban {
         let mut guard = self.inner.upgradable_read();
 
         if guard.ban.is_none() {
+            error!("read queries banned: {} [{}]", error, self.pool.addr());
             guard.with_upgraded(|guard| {
                 guard.ban = Some(BanEntry {
                     created_at,
@@ -116,7 +117,6 @@ impl Ban {
                 self.pool.lock().dump_idle();
             });
             drop(guard);
-            error!("read queries banned: {} [{}]", error, self.pool.addr());
             true
         } else {
             false

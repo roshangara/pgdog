@@ -144,6 +144,8 @@ impl Pool {
                 self.lock().stats.counts.checkout_timeouts += 1;
                 Err(Error::CheckoutTimeout)
             }
+            // The server answered: it refused the login, it didn't fail.
+            Ok(Err(err @ Error::Refused(_))) => Err(err),
             Ok(Err(err)) => {
                 self.inner.health.toggle(false);
                 Err(err)

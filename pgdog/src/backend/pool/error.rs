@@ -1,9 +1,11 @@
 //! Connection pool errors.
+use std::sync::Arc;
+
 use thiserror::Error;
 
-use crate::net::BackendPid;
+use crate::net::{BackendPid, messages::ErrorResponse};
 
-#[derive(Debug, Error, PartialEq, Clone, Copy)]
+#[derive(Debug, Error, PartialEq, Clone)]
 pub(crate) enum Error {
     #[error("checkout timeout")]
     CheckoutTimeout,
@@ -55,6 +57,11 @@ pub(crate) enum Error {
 
     #[error("initial health check has not been successfully performed")]
     InitialHealthCheck,
+
+    /// The server answered a new connection's login and refused it
+    /// ([`ErrorResponse::refuses_login`]): its answer, as it came.
+    #[error("{0}")]
+    Refused(Arc<ErrorResponse>),
 }
 
 impl Error {
@@ -75,6 +82,8 @@ impl Error {
                 | Self::UntrackedConnCheckin(_)
                 // Deliberate shutdown.
                 | Self::FastShutdown
+                // The server said no to this user or database.
+                | Self::Refused(_)
         )
     }
 }

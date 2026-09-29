@@ -289,3 +289,129 @@ async fn test_reload_ends_a_waiting_write_at_once() {
         .unwrap();
     assert!(matches!(result, Err(Error::Offline)), "{result:?}");
 }
+
+/// A role at its connection limit, made for one test and dropped after.
+struct LimitedRole {
+    name: String,
+}
+
+impl LimitedRole {
+    /// A role no connection is allowed (CONNECTION LIMIT 0): every login of
+    /// it gets 53300 "too many connections for role".
+    async fn new() -> Self {
+        use rand::Rng;
+
+        let name = format!(
+            "door_limited_{}",
+            rand::rng().random_range(1_000_000..u32::MAX)
+        );
+        let mut admin = crate::backend::server::test::test_server().await;
+        admin
+            .execute_checked(format!(
+                "CREATE ROLE {name} LOGIN NOSUPERUSER PASSWORD 'pgdog' CONNECTION LIMIT 0"
+            ))
+            .await
+            .unwrap();
+        Self { name }
+    }
+
+    async fn drop_role(self) {
+        let mut admin = crate::backend::server::test::test_server().await;
+        admin
+            .execute_checked(format!("DROP ROLE {}", self.name))
+            .await
+            .unwrap();
+    }
+
+    fn config(&self, host: &str, port: u16) -> PoolConfig {
+        let mut config = create_auto_test_pool_config(host, port);
+        config.address.user = self.name.clone();
+        config.config.checkout_timeout = CHECKOUT_TIMEOUT;
+        config.config.connect_timeout = Duration::from_millis(500);
+        config
+    }
+}
+
+/// The elected primary refuses the login with 53300, too many connections
+/// for the role (a tenant at its connection limit, its connections held by
+/// other doors): that is the primary's answer, not its failure. The write
+/// gets it at once instead of waiting checkout_timeout for an election and
+/// failing with "checkout timeout" (ganjban.7: 35 s).
+#[tokio::test]
+async fn test_a_primary_refusing_the_login_answers_the_write_at_once() {
+    crate::logger();
+    let role = LimitedRole::new().await;
+    let lb = LoadBalancer::new(
+        &None,
+        &[role.config("127.0.0.1", 5432)],
+        LoadBalancingStrategy::RoundRobin,
+        ReadWriteSplit::ExcludePrimary,
+        Default::default(),
+    );
+    lb.targets[0].pool.launch();
+    stats(&lb.targets[0], false, 7, 500, FRESH);
+    lb.redetect_roles();
+    assert_eq!(primary_port(&lb), Some(5432));
+
+    let started = Instant::now();
+    let result = lb.get_primary(&Request::default()).await;
+    let elapsed = started.elapsed();
+    lb.shutdown();
+    role.drop_role().await;
+
+    let err = result.expect_err("the login is refused");
+    assert!(
+        elapsed < Duration::from_millis(1000),
+        "the refusal must reach the write at once, not after {elapsed:?}"
+    );
+    assert!(
+        err.to_string().contains("53300") && err.to_string().contains("too many connections"),
+        "the server's own answer: {err}"
+    );
+    assert!(
+        lb.targets[0].pool.healthy(),
+        "a server that answers is not unhealthy"
+    );
+}
+
+/// A pool whose connections are all out keeps its waiters waiting when the
+/// server refuses a new one: a connection coming back serves them.
+#[tokio::test]
+async fn test_a_refusal_keeps_waiting_while_connections_are_out() {
+    crate::logger();
+    let role = LimitedRole::new().await;
+    let mut admin = crate::backend::server::test::test_server().await;
+    // One connection allowed, and the pool gets it.
+    admin
+        .execute_checked(format!("ALTER ROLE {} CONNECTION LIMIT 1", role.name))
+        .await
+        .unwrap();
+    let mut config = role.config("127.0.0.1", 5432);
+    config.config.max = 2;
+    let pool = Pool::new(&config);
+    pool.launch();
+
+    let first = pool
+        .get(&Request::default())
+        .await
+        .expect("the one connection");
+    let second = {
+        let pool = pool.clone();
+        tokio::spawn(async move { pool.get(&Request::default()).await })
+    };
+    sleep(Duration::from_millis(500)).await;
+    assert!(
+        !second.is_finished(),
+        "the first connection comes back to it: it waits"
+    );
+    drop(first);
+    let second = timeout(Duration::from_secs(1), second)
+        .await
+        .expect("served by the connection that came back")
+        .unwrap();
+    assert!(second.is_ok(), "{:?}", second.err());
+    drop(second);
+
+    pool.shutdown();
+    role.drop_role().await;
+}

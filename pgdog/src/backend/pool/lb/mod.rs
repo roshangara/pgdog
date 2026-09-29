@@ -474,6 +474,12 @@ impl LoadBalancer {
                 // the write, not a later election here.
                 Some(Err(Error::Offline)) => return Err(Error::Offline),
 
+                // The primary answered and refused the login (too many
+                // connections for the role or database, a role or database
+                // dropped): it is the primary, and no election changes its
+                // answer. The client gets it now.
+                Some(Err(err @ Error::Refused(_))) => return Err(err),
+
                 // The elected primary refused or timed out: for this write it
                 // is no primary. Wait for the next election, and try it again
                 // now and then in case it comes back.
@@ -604,6 +610,8 @@ impl LoadBalancer {
                 && target.health().healthy()
         });
 
+        let mut refused = None;
+
         for (i, target) in candidates.iter().enumerate() {
             if target.ban.banned() {
                 continue;
@@ -643,6 +651,9 @@ impl LoadBalancer {
                     continue;
                 }
                 Err(err) => {
+                    if let Error::Refused(_) = err {
+                        refused = Some(err.clone());
+                    }
                     if bannable {
                         target.ban.ban(err, target.pool.config().ban_timeout);
                     }
@@ -654,7 +665,9 @@ impl LoadBalancer {
             .iter()
             .for_each(|target| target.ban.unban(true, UnbanReason::AllTargetsBanned));
 
-        Err(Error::AllReplicasDown)
+        // A server that refused the read's login answered: its answer says
+        // more to the client than that no replica took the read.
+        Err(refused.unwrap_or(Error::AllReplicasDown))
     }
 
     /// Shutdown replica pools.

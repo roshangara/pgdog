@@ -222,20 +222,28 @@ impl Connection {
     async fn try_parameters(&mut self, request: &Request) -> Result<Vec<ParameterStatus>, Error> {
         // Get params from the first database that answers.
         // Parameters are cached on the pool.
+        let mut refused = None;
         for shard in self.cluster()?.shards() {
-            if let Ok(params) = shard.params(request).await {
-                let mut result = vec![];
+            match shard.params(request).await {
+                Ok(params) => {
+                    let mut result = vec![];
 
-                for param in params.iter() {
-                    if let Some(value) = param.1.as_str() {
-                        result.push(ParameterStatus::from((param.0.as_str(), value)));
+                    for param in params.iter() {
+                        if let Some(value) = param.1.as_str() {
+                            result.push(ParameterStatus::from((param.0.as_str(), value)));
+                        }
                     }
-                }
 
-                return Ok(result);
+                    return Ok(result);
+                }
+                // The server refused the login (a role at its connection
+                // limit, a role or database dropped): the client gets its
+                // answer, as it would from PostgreSQL.
+                Err(err @ pool::Error::Refused(_)) => refused = Some(err),
+                Err(_) => (),
             }
         }
-        Err(Error::Pool(pool::Error::AllReplicasDown))
+        Err(Error::Pool(refused.unwrap_or(pool::Error::AllReplicasDown)))
     }
 
     /// Read a message from the server connection or a pub/sub channel.

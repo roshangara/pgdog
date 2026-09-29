@@ -9,7 +9,7 @@ use crate::{net::c_string_buf, state::State};
 use crate::frontend::Error as FrontendError;
 
 /// ErrorResponse (B) message.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ErrorResponse {
     pub(crate) severity: String,
     pub(crate) code: String,
@@ -38,6 +38,16 @@ impl ErrorResponse {
     /// True if this error response signals an invalid password (SQLSTATE 28P01).
     pub(crate) fn is_bad_password(&self) -> bool {
         self.code == "28P01"
+    }
+
+    /// The server answered a login and refused it for its user or
+    /// database: authentication (class 28), a database that doesn't exist
+    /// (3D000), no right to connect (42501), an object such as the role
+    /// that doesn't exist (42704), or too many connections (53300: for the
+    /// role, the database or the server). The server is up; it says no.
+    pub(crate) fn refuses_login(&self) -> bool {
+        self.code.starts_with("28")
+            || matches!(self.code.as_str(), "3D000" | "42501" | "42704" | "53300")
     }
 
     /// Authentication error.
@@ -286,8 +296,14 @@ impl ErrorResponse {
 
     pub(crate) fn from_client_err(err: &FrontendError) -> Self {
         use crate::backend::Error as BackendError;
+        use crate::backend::pool::Error as PoolError;
         if let FrontendError::Backend(BackendError::ExecutionError(err)) = err {
             *(err.clone())
+        } else if let FrontendError::Backend(BackendError::Pool(PoolError::Refused(response))) = err
+        {
+            // The server refused a new connection's login: its answer, as
+            // PostgreSQL gives it to a client that connects directly.
+            (**response).clone()
         } else if let FrontendError::AdminTermination = err {
             // Allows us to set a custom code (to identically represent the same Postgres error)
             ErrorResponse::admin_termination()

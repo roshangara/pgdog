@@ -333,7 +333,8 @@ impl Monitor {
         debug!("maintenance shut down [{}]", pool.addr());
     }
 
-    /// Replenish pool with one new connection.
+    /// Replenish pool with one new connection. False when the server
+    /// failed: it didn't answer, or broke off the login.
     async fn replenish(&self, reason: ConnectReason) -> Result<bool, Error> {
         match Self::create_connection(&self.pool, reason).await {
             Ok(conn) => {
@@ -344,6 +345,13 @@ impl Monitor {
                     server.set_term(guard.term.child_token());
                     guard.put(server, now)?;
                 }
+                Ok(true)
+            }
+            // The server answers and refused the login (a role or database
+            // at its connection limit, a role or database dropped): not a
+            // server failure. The clients waiting get its answer.
+            Err(Error::Refused(response)) => {
+                self.pool.lock().login_refused(response);
                 Ok(true)
             }
             _ => Ok(false),
@@ -502,6 +510,15 @@ impl Monitor {
                         err,
                         pool.addr(),
                     );
+
+                    // The server answered and refused this login: another
+                    // attempt now gets the same answer, and the caller
+                    // needs the answer itself, not that it failed.
+                    if let crate::backend::Error::ConnectionError(ref response) = err
+                        && response.refuses_login()
+                    {
+                        return Err(Error::Refused(Arc::new((**response).clone())));
+                    }
                     error = Error::ServerError;
                 }
 

@@ -3,11 +3,12 @@
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::fmt::Display;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::backend::{ConnectReason, DisconnectReason};
 use crate::backend::{Server, stats::Counts as BackendCounts};
-use crate::net::messages::{BackendKeyData, BackendPid, FrontendPid};
+use crate::net::messages::{BackendKeyData, BackendPid, ErrorResponse, FrontendPid};
 
 use pgdog_config::Role;
 use pgdog_stats::RoleSpecificConfig;
@@ -494,7 +495,17 @@ impl Inner {
     #[inline]
     pub(super) fn close_waiters(&mut self, err: Error) {
         for waiter in self.waiting.drain(..) {
-            let _ = waiter.tx.send(Err(err));
+            let _ = waiter.tx.send(Err(err.clone()));
+        }
+    }
+
+    /// The server refused a new connection's login. With none of this
+    /// pool's connections out, none will come back to the clients waiting:
+    /// they get the server's answer now, not a checkout timeout. Otherwise
+    /// they wait for one as before.
+    pub(super) fn login_refused(&mut self, response: Arc<ErrorResponse>) {
+        if self.checked_out() == 0 {
+            self.close_waiters(Error::Refused(response));
         }
     }
 
