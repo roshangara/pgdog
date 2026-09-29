@@ -321,13 +321,68 @@ impl LoadBalancer {
         self.get_internal(request).await
     }
 
-    /// Get parameters from first non-banned connection pool.
+    /// Server parameters for a new client: those a pool already has, or
+    /// from the first server that answers, nearest first. A server that
+    /// fails is not the end: the next one is asked (a pool just made, after
+    /// a reload or for a new user, doesn't know yet which servers are down,
+    /// and the nearest may be a readers address with nothing behind it).
+    /// With automatic roles and none answering, the elected primary is
+    /// asked once there is one, within `checkout_timeout`: the hold a write
+    /// gets. A server's refusal of the login is the answer when no server
+    /// has another.
     pub(crate) async fn params(&self, request: &Request) -> Result<&Parameters, Error> {
-        if let Some(target) = self.targets.iter().find(|target| !target.ban.banned()) {
-            return target.pool.params(request).await;
+        let candidates: Vec<&Target> = self
+            .targets
+            .iter()
+            .filter(|target| !target.ban.banned())
+            .collect();
+
+        if let Some(params) = candidates
+            .iter()
+            .find_map(|target| target.pool.cached_params())
+        {
+            return Ok(params);
         }
 
-        Err(Error::AllReplicasDown)
+        let election = self.role_detection_enabled();
+        let mut error = Error::AllReplicasDown;
+
+        for (i, target) in candidates.iter().enumerate() {
+            // Somewhere else to go: don't wait on this one longer than
+            // replica_checkout_timeout.
+            let fallback = election || i + 1 < candidates.len();
+            let result = if fallback {
+                target
+                    .pool
+                    .params_timeout(request, target.pool.config().replica_checkout_timeout)
+                    .await
+            } else {
+                target.pool.params(request).await
+            };
+
+            match result {
+                Ok(params) => return Ok(params),
+                // A refusal is the answer to give if no server has another.
+                Err(err) if error.refusal().is_none() => error = err,
+                Err(_) => (),
+            }
+        }
+
+        if election {
+            let conn = self.get_primary(request).await?;
+            if let Some(target) = self
+                .targets
+                .iter()
+                .find(|target| target.pool.id() == conn.pool.id())
+            {
+                target.pool.cache_params(conn.params());
+                if let Some(params) = target.pool.cached_params() {
+                    return Ok(params);
+                }
+            }
+        }
+
+        Err(error)
     }
 
     /// Move connections from this replica set to another.

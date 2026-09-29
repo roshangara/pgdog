@@ -235,10 +235,21 @@ impl Pool {
 
     /// Get server parameters, fetch them if necessary.
     pub(crate) async fn params(&self, request: &Request) -> Result<&Parameters, Error> {
+        self.params_timeout(request, self.config().checkout_timeout)
+            .await
+    }
+
+    /// Get server parameters, waiting at most `timeout` for a connection
+    /// to fetch them with.
+    pub(crate) async fn params_timeout(
+        &self,
+        request: &Request,
+        timeout: Duration,
+    ) -> Result<&Parameters, Error> {
         if let Some(params) = self.inner.params.get() {
             Ok(params)
         } else {
-            let conn = self.get(request).await?;
+            let conn = self.get_timeout(request, timeout).await?;
             let params = conn.params().clone();
             Ok(self.inner.params.get_or_init(|| params))
         }

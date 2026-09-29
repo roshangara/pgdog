@@ -415,3 +415,49 @@ async fn test_a_refusal_keeps_waiting_while_connections_are_out() {
     pool.shutdown();
     role.drop_role().await;
 }
+
+/// A new client's server parameters come from a server that answers. The
+/// nearest entry (weight 255 in ganjban's door) may be a readers address
+/// with nothing behind it; right after a reload or for a new user its pool
+/// is not banned yet and the primary not yet elected. ganjban.7 asked that
+/// entry alone and aborted the client: "connection pool ... is down".
+#[tokio::test]
+async fn test_a_new_clients_parameters_come_from_a_server_that_answers() {
+    crate::logger();
+    let configs = [("127.0.0.1", 1), ("127.0.0.1", 5432)]
+        .iter()
+        .map(|(host, port)| {
+            let mut config = create_auto_test_pool_config(host, *port);
+            config.config.checkout_timeout = CHECKOUT_TIMEOUT;
+            config.config.connect_timeout = Duration::from_millis(100);
+            config.config.replica_checkout_timeout = Duration::from_millis(300);
+            config.config.replica_down_detection = true;
+            config
+        })
+        .collect::<Vec<_>>();
+    let lb = LoadBalancer::new(
+        &None,
+        &configs,
+        LoadBalancingStrategy::WeightedRoundRobin,
+        ReadWriteSplit::ExcludePrimary,
+        Default::default(),
+    );
+    for target in &lb.targets {
+        target.pool.launch();
+    }
+    assert!(lb.primary().is_none(), "not elected yet");
+
+    let started = Instant::now();
+    let params = lb
+        .params(&Request::default())
+        .await
+        .map(|params| params.len());
+    let elapsed = started.elapsed();
+    lb.shutdown();
+
+    assert!(params.is_ok(), "{params:?}");
+    assert!(
+        elapsed < Duration::from_millis(1000),
+        "the next server answers at once, took {elapsed:?}"
+    );
+}
