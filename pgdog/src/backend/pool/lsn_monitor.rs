@@ -49,7 +49,15 @@ SELECT
         ELSE
             now()
     END AS timestamp,
-    (pg_control_checkpoint()).timeline_id AS timeline
+    -- A primary's timeline is in the name of its current WAL file. After a
+    -- promotion, pg_control_checkpoint() keeps the old timeline until the
+    -- first checkpoint completes, which is spread over minutes.
+    CASE
+        WHEN replica THEN
+            (pg_control_checkpoint()).timeline_id
+        ELSE
+            ('x' || substr(pg_walfile_name(lsn), 1, 8))::bit(32)::int
+    END AS timeline
 FROM wal
 ";
 
@@ -309,6 +317,7 @@ mod test {
         assert!(!stats.aurora, "local Postgres is not Aurora");
         assert!(stats.lsn.lsn > 0, "primary LSN should advance past 0");
         assert!(stats.offset_bytes > 0, "offset bytes should be positive");
+        assert!(stats.timeline >= 1, "a primary reports its timeline");
 
         monitor.pool.shutdown();
     }
