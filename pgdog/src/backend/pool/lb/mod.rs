@@ -216,11 +216,17 @@ impl LoadBalancer {
                 .for_each(|(_, target)| {
                     target.1.set_role(Role::Replica);
                 });
-        } else if targets.iter().all(|target| target.0.valid()) {
-            // All targets are replicas until we get a primary.
-            targets.iter().for_each(|target| {
-                target.1.set_role(Role::Replica);
-            });
+        } else {
+            // No primary right now, e.g. during a failover. A server that
+            // reports being in recovery is a replica, even if it was the
+            // primary and other servers haven't answered yet, so writes stop
+            // going to it. Servers without stats keep their role until they
+            // answer.
+            for (stats, target) in &targets {
+                if stats.valid() && target.set_role(Role::Replica) {
+                    warn!("primary is in recovery, demoted: {}", target.pool.addr());
+                }
+            }
         }
 
         self.elected_primary.send_replace(self.primary().cloned());

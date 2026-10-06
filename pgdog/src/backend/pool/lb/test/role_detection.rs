@@ -123,3 +123,24 @@ fn test_redetect_roles_prefers_highest_timeline_then_freshest_stats() {
         );
     }
 }
+
+#[test]
+fn test_primary_in_recovery_is_demoted_while_another_target_is_unknown() {
+    let lb = auto_pool(&["localhost", "127.0.0.1", "unknown-replica"]);
+    set_lsn_stats(&lb.targets[0], false, 500);
+    set_lsn_stats(&lb.targets[1], true, 500);
+    assert!(lb.redetect_roles());
+    assert_eq!(
+        lb.primary().expect("elected primary").addr().host,
+        "localhost"
+    );
+
+    // The primary comes back as a replica (e.g. after a failover) while
+    // the third server hasn't answered an LSN check yet. Nobody else is
+    // the primary: writes must stop going to a read-only server.
+    set_lsn_stats(&lb.targets[0], true, 510);
+    assert!(!lb.redetect_roles(), "nobody was promoted");
+
+    assert!(lb.primary().is_none());
+    assert_eq!(lb.targets[0].role(), Role::Replica);
+}
